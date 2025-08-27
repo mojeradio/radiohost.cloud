@@ -1,0 +1,7 @@
+{
+  "name": "Radiohost.cloud beta2",
+  "description": "An AI-powered web application for modern radio automation, helping you schedule, manage, and create content effortlessly with the power of Gemini.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
