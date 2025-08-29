@@ -17,7 +17,7 @@ COPY . .
 RUN npm run build
 
 # Otwórz port dla aplikacji (domyślnie Vite preview: 5173)
-EXPOSE 5173
+EXPOSE 6080
 
 # Komenda uruchamiania (preview build Vite)
 CMD ["npm", "run", "preview"]
