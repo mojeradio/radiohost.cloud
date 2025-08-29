@@ -20,4 +20,4 @@ RUN npm run build
 EXPOSE 6080
 
 # Komenda uruchamiania (preview build Vite)
-CMD ["npm", "run", "preview"]
+CMD ["service-worker.js"]
