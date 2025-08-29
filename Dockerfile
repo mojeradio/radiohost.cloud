@@ -10,7 +10,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm
+RUN npm install
 # Copy source code
 COPY . .
 
@@ -34,5 +34,6 @@ RUN sed -i 's/listen 80;/listen 6080;/g' /etc/nginx/conf.d/default.conf || echo 
 
 # Start nginx
 CMD ["nginx", "-g", "daemon off;"]
+
 
 
