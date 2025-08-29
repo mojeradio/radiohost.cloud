@@ -9,4 +9,4 @@ COPY . .
 
 EXPOSE 6080
 
-CMD ["node", "service-worker.js"]
+CMD ["install", "node", "service-worker.js"]
