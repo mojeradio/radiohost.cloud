@@ -1,6 +1,5 @@
 import React from 'react';
 
-// FIX: Added IconProps to accept a title for tooltips and accessibility.
 interface IconProps extends React.SVGProps<SVGSVGElement> {
     title?: string;
 }

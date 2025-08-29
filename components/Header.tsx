@@ -1,7 +1,3 @@
-
-
-
-
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { UserIcon } from './icons/UserIcon';
 import { LogoutIcon } from './icons/LogoutIcon';
@@ -14,7 +10,6 @@ import Clock from './Clock';
 import ConfirmationDialog from './ConfirmationDialog';
 import { EnterFullscreenIcon } from './icons/EnterFullscreenIcon';
 import { ExitFullscreenIcon } from './icons/ExitFullscreenIcon';
-import { RotationIcon } from './icons/RotationIcon';
 
 interface HeaderProps {
     currentUser: { email: string; nickname: string; } | null;
@@ -30,8 +25,6 @@ interface HeaderProps {
     onLogoChange: (file: File) => void;
     onLogoReset: () => void;
     headerGradient: string | null;
-    isAutoFillEnabled: boolean;
-    onToggleAutoFill: () => void;
 }
 
 const formatDuration = (seconds: number): string => {
@@ -43,7 +36,7 @@ const formatDuration = (seconds: number): string => {
 
 const Header: React.FC<HeaderProps> = ({ 
     currentUser, onLogout, currentTrack, onNext, onPrevious, isPlaying, onTogglePlay, isPresenterLive = false, progress,
-    logoSrc, onLogoChange, onLogoReset, headerGradient, isAutoFillEnabled, onToggleAutoFill,
+    logoSrc, onLogoChange, onLogoReset, headerGradient,
 }) => {
     
     const [isLogoConfirmOpen, setIsLogoConfirmOpen] = useState(false);
@@ -161,13 +154,6 @@ const Header: React.FC<HeaderProps> = ({
                             title={isPresenterLive ? 'Cannot skip during live broadcast' : 'Next Track'}
                         >
                             <ForwardIcon className="w-6 h-6" />
-                        </button>
-                        <button
-                            onClick={onToggleAutoFill}
-                            className={`p-3 rounded-full transition-colors ${isAutoFillEnabled ? 'bg-black/10 dark:bg-white/10 text-black dark:text-white' : 'bg-black/5 dark:bg-black/20 text-neutral-500'}`}
-                            title={isAutoFillEnabled ? 'Auto-fill Playlist On' : 'Auto-fill Playlist Off'}
-                        >
-                            <RotationIcon className="w-6 h-6" />
                         </button>
                     </div>
                      <div className="w-full max-w-sm space-y-1">

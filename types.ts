@@ -1,3 +1,4 @@
+
 export enum TrackType {
   SONG = 'Song',
   JINGLE = 'Jingle',
@@ -10,11 +11,24 @@ export enum TrackType {
 export interface Track {
   id: string;
   title: string;
-  artist: string;
+  artist?: string;
   duration: number; // in seconds
   type: TrackType;
   src: string;
   tags?: string[];
+  addedBy?: 'auto-fill' | 'user';
+}
+
+export enum TimeMarkerType {
+  HARD = 'hard',
+  SOFT = 'soft',
+}
+
+export interface TimeMarker {
+  id: string;
+  type: 'marker';
+  time: number; // Stored as timestamp for easier comparison
+  markerType: TimeMarkerType;
 }
 
 export interface Folder {
@@ -32,76 +46,17 @@ export interface Folder {
 
 export type LibraryItem = Track | Folder;
 
-export interface TimeFixMarker {
-  id: string; // for react key
-  type: 'marker';
-  time: string; // "HH:MM:SS"
-  markerType: 'hard' | 'soft';
-  title?: string;
-}
+// A SequenceItem can be a track or a time marker for the playlist.
+export type SequenceItem = Track | TimeMarker;
 
-export interface ClockStartMarker {
-  id: string;
-  type: 'clock_start_marker';
-  hour: number;
-  title?: string;
-  loadMode?: 'hard' | 'soft';
-}
-
-export interface RandomFromFolderMarker {
-  id: string;
-  type: 'random_from_folder';
-  folderId: string;
-}
-
-export interface RandomFromTagMarker {
-  id: string;
-  type: 'random_from_tag';
-  tag: string;
-}
-
-
-export interface AutoFillMarker {
-  id: string;
-  type: 'autofill_marker';
-  title: string;
-}
-
-export interface HourBoundaryMarker {
-  id: string; 
-  type: 'hour_boundary_marker';
-  hour: number; 
-  source: 'schedule' | 'autofill';
-  title: string;
-}
-
-
-export type SequenceItem = Track | TimeFixMarker | ClockStartMarker | RandomFromFolderMarker | RandomFromTagMarker | AutoFillMarker;
-
-export type TimelineItem = (SequenceItem | HourBoundaryMarker) & { 
-  isSkipped?: boolean;
+export type TimelineItem = Track & { 
   shortenedBy?: number;
 };
 
-export interface ScheduledBlock {
-  id: string;
-  hour: number; // 0-23
-  title?: string;
-  type: 'sequence' | 'folder';
-  loadMode?: 'hard' | 'soft'; // New field for auto-load behavior
-  preloadTime?: number; // in minutes, per-block setting
-  sequenceItems?: SequenceItem[];
-  folderId?: string;
-  daysOfWeek?: number[]; // 0=Sun, 1=Mon, ..., 6=Sat
-  daysOfMonth?: number[]; // 1-31
-}
 
 export interface PlayoutPolicy {
   artistSeparation: number; // in minutes
   titleSeparation: number; // in minutes
-  autoFillPlaylist: boolean;
-  autoFillTags: string[];
-  autoFillLookahead: number; // in minutes
   removePlayedTracks: boolean;
   normalizationEnabled: boolean;
   normalizationTargetDb: number; // in dB
@@ -116,12 +71,17 @@ export interface PlayoutPolicy {
   micDuckingLevel: number; // gain level from 0 to 1
   micDuckingFadeDuration: number; // in seconds
   pflDuckingLevel: number; // gain level from 0 to 1
+  isAutoFillEnabled: boolean;
+  autoFillLeadTime: number; // in minutes
+  autoFillSourceType: 'folder' | 'tag';
+  autoFillSourceId: string | null;
+  autoFillTargetDuration: number; // in minutes
 }
 
 export interface PlayoutHistoryEntry {
   trackId: string;
   title: string;
-  artist: string;
+  artist?: string;
   playedAt: number; // timestamp
 }
 

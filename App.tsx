@@ -1,26 +1,18 @@
 
 
-
-
-
-
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
-import { type Track, TrackType, type Folder, type LibraryItem, type ScheduledBlock, type PlayoutPolicy, type PlayoutHistoryEntry, type SequenceItem, type TimeFixMarker, type CartwallItem, type CartwallCategory, type ClockStartMarker, type RandomFromFolderMarker, type AutoFillMarker, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type RandomFromTagMarker, type HourBoundaryMarker, type TimelineItem } from './types';
+import { type Track, TrackType, type Folder, type LibraryItem, type PlayoutPolicy, type PlayoutHistoryEntry, type CartwallCategory, type AudioBus, type MixerConfig, type AudioSourceId, type AudioBusId, type SequenceItem, TimeMarker, TimeMarkerType } from './types';
 import Header from './components/Header';
 import MediaLibrary from './components/MediaLibrary';
 import Playlist from './components/Playlist';
 import Auth from './components/Auth';
 import RemoteStudio, { type RemoteStudioRef } from './components/RemoteStudio';
-import RotationScheduler from './components/RotationScheduler';
-import { generatePlaylistFromFolder, generatePlaylistFromTags } from './services/playlistService';
 import { getTrack as getTrackFromDB, deleteTrack as deleteTrackFromDB, setConfig, getConfig } from './services/dbService';
 import Settings from './components/Settings';
 import { SettingsIcon } from './components/icons/SettingsIcon';
-import { ClockIcon } from './components/icons/ClockIcon';
 import Cartwall from './components/Cartwall';
 import { GridIcon } from './components/icons/GridIcon';
 import Resizer from './components/Resizer';
-import ConfirmationDialog from './components/ConfirmationDialog';
 import MetadataSettingsModal from './components/MetadataSettingsModal';
 import { ChevronUpIcon } from './components/icons/ChevronUpIcon';
 import { ChevronDownIcon } from './components/icons/ChevronDownIcon';
@@ -38,7 +30,6 @@ const USERS_STORAGE_KEY = 'radiohost_users';
 const USER_LIBRARIES_STORAGE_KEY = 'radiohost_userLibraries';
 const USER_SETTINGS_KEY = 'radiohost_userSettings';
 const USER_PLAYLISTS_STORAGE_KEY = 'radiohost_userPlaylists';
-const USER_SCHEDULES_STORAGE_KEY = 'radiohost_userSchedules';
 const USER_CARTWALL_STORAGE_KEY = 'radiohost_userCartwall';
 const USER_PLAYBACK_STATE_KEY = 'radiohost_userPlaybackState';
 const USER_AUDIO_CONFIG_KEY = 'radiohost_userAudioConfig';
@@ -47,7 +38,6 @@ const USER_AUDIO_CONFIG_KEY = 'radiohost_userAudioConfig';
 const GUEST_LIBRARY_KEY = 'radiohost_guestLibrary';
 const GUEST_SETTINGS_KEY = 'radiohost_guestSettings';
 const GUEST_PLAYLIST_KEY = 'radiohost_guestPlaylist';
-const GUEST_SCHEDULE_KEY = 'radiohost_guestSchedule';
 const GUEST_CARTWALL_KEY = 'radiohost_guestCartwall';
 const GUEST_PLAYBACK_STATE_KEY = 'radiohost_guestPlaybackState';
 const GUEST_AUDIO_CONFIG_KEY = 'radiohost_guestAudioConfig';
@@ -74,9 +64,6 @@ const createInitialCartwall = (itemCount: number = 16): CartwallCategory[] => {
 const defaultPlayoutPolicy: PlayoutPolicy = {
     artistSeparation: 60, // 60 minutes
     titleSeparation: 120, // 120 minutes
-    autoFillPlaylist: true,
-    autoFillTags: ['auto'],
-    autoFillLookahead: 15, // in minutes
     removePlayedTracks: false,
     normalizationEnabled: false,
     normalizationTargetDb: -24,
@@ -91,6 +78,11 @@ const defaultPlayoutPolicy: PlayoutPolicy = {
     micDuckingLevel: 0.2,
     micDuckingFadeDuration: 0.5, // 500ms fade for smoothness
     pflDuckingLevel: 0.1,
+    isAutoFillEnabled: false,
+    autoFillLeadTime: 10, // minutes
+    autoFillSourceType: 'folder',
+    autoFillSourceId: null,
+    autoFillTargetDuration: 60, // minutes
 };
 
 const initialBuses: AudioBus[] = [
@@ -236,18 +228,6 @@ const updateTrackInTree = (node: Folder, trackId: string, updateFn: (track: Trac
 };
 
 
-const collectAllChildTracks = (item: LibraryItem): Track[] => {
-    if (item.type !== 'folder') {
-        return [item as Track];
-    }
-    let tracks: Track[] = [];
-    for (const child of item.children) {
-        tracks = tracks.concat(collectAllChildTracks(child));
-    }
-    return tracks;
-};
-
-
 const findAndRemoveItem = (node: Folder, itemId: string): { updatedNode: Folder; foundItem: LibraryItem | null } => {
     let foundItem: LibraryItem | null = null;
     
@@ -284,19 +264,6 @@ const findTrackInTree = (node: Folder, trackId: string): Track | null => {
         }
         if (child.type === 'folder') {
             const found = findTrackInTree(child, trackId);
-            if (found) return found;
-        }
-    }
-    return null;
-};
-
-const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
-    if (node.id === folderId) {
-        return node;
-    }
-    for (const child of node.children) {
-        if (child.type === 'folder') {
-            const found = findFolderInTree(child, folderId);
             if (found) return found;
         }
     }
@@ -343,18 +310,6 @@ const getAllFolders = (node: Folder): { id: string; name: string }[] => {
     return folders;
 };
 
-const getAllTracks = (node: Folder): Track[] => {
-    let tracks: Track[] = [];
-    for (const child of node.children) {
-        if (child.type === 'folder') {
-            tracks = tracks.concat(getAllTracks(child));
-        } else {
-            tracks.push(child);
-        }
-    }
-    return tracks;
-};
-
 const getAllTags = (node: Folder): string[] => {
     const tagSet = new Set<string>();
     const traverse = (item: LibraryItem) => {
@@ -369,69 +324,6 @@ const getAllTags = (node: Folder): string[] => {
     return Array.from(tagSet).sort();
 };
 
-function shuffleArray<T>(array: T[]): T[] {
-  const newArray = [...array];
-  for (let i = newArray.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
-  }
-  return newArray;
-}
-
-/**
- * Finds the most specific scheduled block for a given hour and date.
- * Priority: Day of Month > Day of Week > Default.
- */
-const findBlockForHour = (schedule: ScheduledBlock[], hour: number, date: Date): ScheduledBlock | undefined => {
-    const dayOfMonth = date.getDate();
-    const dayOfWeek = date.getDay();
-
-    const blocksForHour = schedule.filter(b => b.hour === hour);
-
-    const dayOfMonthMatch = blocksForHour.find(b => b.daysOfMonth?.includes(dayOfMonth));
-    if (dayOfMonthMatch) return dayOfMonthMatch;
-
-    const dayOfWeekMatch = blocksForHour.find(b => b.daysOfWeek?.includes(dayOfWeek));
-    if (dayOfWeekMatch) return dayOfWeekMatch;
-
-    const defaultMatch = blocksForHour.find(b => !b.daysOfWeek && !b.daysOfMonth);
-    return defaultMatch;
-};
-
-
-/**
- * Filters a list of tracks based on artist and title separation rules.
- */
-const applySeparationPolicy = (tracks: Track[], policy: PlayoutPolicy, history: PlayoutHistoryEntry[]): Track[] => {
-    if (!history || history.length === 0) return tracks;
-    
-    const now = Date.now();
-    const recentHistory = history.slice(-50); // Optimization: only check recent history
-
-    const availableTracks = tracks.filter(track => {
-        // Don't filter non-song items
-        if (track.type !== TrackType.SONG) return true;
-        
-        const titleViolation = recentHistory.some(entry =>
-            entry.title.toLowerCase() === track.title.toLowerCase() &&
-            now - entry.playedAt < policy.titleSeparation * 60 * 1000
-        );
-        if (titleViolation) return false;
-
-        const artistViolation = recentHistory.some(entry =>
-            entry.artist && track.artist && entry.artist.toLowerCase() === track.artist.toLowerCase() &&
-            now - entry.playedAt < policy.artistSeparation * 60 * 1000
-        );
-        if (artistViolation) return false;
-
-        return true;
-    });
-
-    // If filtering removes all tracks, return the original unfiltered list to prevent empty playlists
-    return availableTracks.length > 0 ? availableTracks : tracks;
-};
-
-
 // --- App Component ---
 
 const AppInternal: React.FC = () => {
@@ -443,11 +335,9 @@ const AppInternal: React.FC = () => {
     const [currentTrackIndex, setCurrentTrackIndex] = useState(0);
     const [currentPlayingItemId, setCurrentPlayingItemId] = useState<string | null>(null);
     const [isPlaying, setIsPlaying] = useState(false);
-    const [isAutoplayEnabled, setIsAutoplayEnabled] = useState(true); // This is the old state, now used for "play next" logic
     const [isPresenterLive, setIsPresenterLive] = useState(false);
     const [trackProgress, setTrackProgress] = useState(0);
-    const [schedule, setSchedule] = useState<ScheduledBlock[]>([]);
-    const [activeRightColumnTab, setActiveRightColumnTab] = useState<'scheduler' | 'cartwall' | 'mixer' | 'settings'>('cartwall');
+    const [activeRightColumnTab, setActiveRightColumnTab] = useState<'cartwall' | 'mixer' | 'settings'>('cartwall');
     const [isMicPanelCollapsed, setIsMicPanelCollapsed] = useState(false);
     const [stopAfterTrackId, setStopAfterTrackId] = useState<string | null>(null);
     const [playoutPolicy, setPlayoutPolicy] = useState<PlayoutPolicy>(defaultPlayoutPolicy);
@@ -461,13 +351,10 @@ const AppInternal: React.FC = () => {
     const [playingCartwallId, setPlayingCartwallId] = useState<string | null>(null);
     const [cartwallTrackProgress, setCartwallTrackProgress] = useState(0);
     const [cartwallTrackDuration, setCartwallTrackDuration] = useState(0);
-    const [playlistLoadRequest, setPlaylistLoadRequest] = useState<{ hour: number; generatedPlaylist: SequenceItem[] } | null>(null);
     const [editingMetadataFolder, setEditingMetadataFolder] = useState<Folder | null>(null);
     const [editingTrack, setEditingTrack] = useState<Track | null>(null);
     const [isHeaderCollapsed, setIsHeaderCollapsed] = useState(false);
     const [isLibraryCollapsed, setIsLibraryCollapsed] = useState(false);
-    const [skippedItemIds, setSkippedItemIds] = useState<Set<string>>(new Set());
-    const [autoFilledItemIds, setAutoFilledItemIds] = useState<Set<string>>(new Set());
 
     
     // --- PFL (Pre-Fade Listen) State ---
@@ -496,7 +383,6 @@ const AppInternal: React.FC = () => {
     const cartwallAudioUrlRef = useRef<string | null>(null);
     const remoteStudioRef = useRef<RemoteStudioRef>(null);
     const isCrossfadingRef = useRef(false);
-    const lastTriggeredMarkerIdRef = useRef<string | null>(null);
     const nowPlayingFileHandleRef = useRef<FileSystemFileHandle | null>(null);
     const autoBackupFolderHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
     const audioBufferRef = useRef<Map<string, Blob>>(new Map());
@@ -522,16 +408,12 @@ const AppInternal: React.FC = () => {
     trackProgressRef.current = trackProgress;
     const isPlayingRef = useRef(isPlaying);
     isPlayingRef.current = isPlaying;
-    const scheduleRef = useRef(schedule);
-    scheduleRef.current = schedule;
     const mediaLibraryRef = useRef(mediaLibrary);
     mediaLibraryRef.current = mediaLibrary;
     const playoutPolicyRef = useRef(playoutPolicy);
     playoutPolicyRef.current = playoutPolicy;
     const playoutHistoryRef = useRef(playoutHistory);
     playoutHistoryRef.current = playoutHistory;
-    const isAutoplayEnabledRef = useRef(isAutoplayEnabled);
-    isAutoplayEnabledRef.current = isAutoplayEnabled;
     const isAutoBackupEnabledRef = useRef(isAutoBackupEnabled);
     isAutoBackupEnabledRef.current = isAutoBackupEnabled;
     const isAutoBackupOnStartupEnabledRef = useRef(isAutoBackupOnStartupEnabled);
@@ -542,10 +424,7 @@ const AppInternal: React.FC = () => {
     cartwallCategoriesRef.current = cartwallCategories;
     const stopAfterTrackIdRef = useRef(stopAfterTrackId);
     stopAfterTrackIdRef.current = stopAfterTrackId;
-    const skippedItemIdsRef = useRef(skippedItemIds);
-    skippedItemIdsRef.current = skippedItemIds;
-    const autoFilledItemIdsRef = useRef(autoFilledItemIds);
-    autoFilledItemIdsRef.current = autoFilledItemIds;
+    const timelineRef = useRef(new Map<string, { startTime: Date, endTime: Date, duration: number, isSkipped?: boolean, shortenedBy?: number }>());
 
 
     // --- AUDIO WORKLET ---
@@ -633,8 +512,10 @@ const AppInternal: React.FC = () => {
     const mainRef = useRef<HTMLElement>(null);
 
 
-    const currentItem = useMemo(() => playlist[currentTrackIndex], [playlist, currentTrackIndex]);
-    const currentTrack = useMemo(() => (currentItem?.type !== 'marker' && currentItem?.type !== 'clock_start_marker' && currentItem?.type !== 'autofill_marker' && currentItem?.type !== 'random_from_folder' && currentItem?.type !== 'random_from_tag' ? currentItem as Track : undefined), [currentItem]);
+    const currentTrack = useMemo(() => {
+        const item = playlist[currentTrackIndex];
+        return item?.type !== 'marker' ? item : undefined;
+    }, [playlist, currentTrackIndex]);
 
     const displayTrack = useMemo(() => {
         if (!currentTrack) return undefined;
@@ -688,7 +569,6 @@ const AppInternal: React.FC = () => {
             
             let initialLibrary: Folder;
             let initialPlaylist: SequenceItem[];
-            let initialSchedule: ScheduledBlock[];
             let initialSettings: any = {};
             let initialCartwall: CartwallCategory[];
             let initialPlaybackState: any | null = null;
@@ -711,9 +591,6 @@ const AppInternal: React.FC = () => {
                     
                     initialSettings = (JSON.parse(localStorage.getItem(USER_SETTINGS_KEY) || '{}'))[savedUserEmail] || {};
                     
-                    const allSchedules = JSON.parse(localStorage.getItem(USER_SCHEDULES_STORAGE_KEY) || '{}');
-                    initialSchedule = allSchedules[savedUserEmail] || [];
-
                     initialCartwall = (JSON.parse(localStorage.getItem(USER_CARTWALL_STORAGE_KEY) || '{}'))[savedUserEmail] || createInitialCartwall();
                     initialAudioConfig = (JSON.parse(localStorage.getItem(USER_AUDIO_CONFIG_KEY) || '{}'))[savedUserEmail] || null;
                 } else {
@@ -726,7 +603,6 @@ const AppInternal: React.FC = () => {
                 initialPlaybackState = JSON.parse(localStorage.getItem(GUEST_PLAYBACK_STATE_KEY) || 'null');
                 initialLibrary = JSON.parse(localStorage.getItem(GUEST_LIBRARY_KEY) || 'null') || createInitialLibrary();
                 initialSettings = JSON.parse(localStorage.getItem(GUEST_SETTINGS_KEY) || '{}');
-                initialSchedule = JSON.parse(localStorage.getItem(GUEST_SCHEDULE_KEY) || '[]');
                 initialCartwall = JSON.parse(localStorage.getItem(GUEST_CARTWALL_KEY) || 'null') || createInitialCartwall();
                 initialAudioConfig = JSON.parse(localStorage.getItem(GUEST_AUDIO_CONFIG_KEY) || 'null');
             }
@@ -734,11 +610,9 @@ const AppInternal: React.FC = () => {
             // --- Set base state first ---
             if (loggedInUser) setCurrentUser(loggedInUser);
             setMediaLibrary(initialLibrary);
-            setSchedule(initialSchedule);
             setCartwallCategories(initialCartwall);
             setActiveCartwallCategoryId(initialCartwall[0]?.id || null);
             setPlayoutPolicy({ ...defaultPlayoutPolicy, ...initialSettings.playoutPolicy });
-            setIsAutoplayEnabled(initialSettings.isAutoplayEnabled ?? true);
             setLogoSrc(initialSettings.logoSrc || null);
             setHeaderGradient(initialSettings.headerGradient || null);
             setIsNowPlayingExportEnabled(initialSettings.isNowPlayingExportEnabled || false);
@@ -778,96 +652,21 @@ const AppInternal: React.FC = () => {
                 setMixerConfig(mergedMixerConfig);
             }
 
-            // --- Decide how to handle playlist and playback state ---
-            // If the playlist is empty, or if the player was paused when last closed, regenerate a fresh playlist.
-            // This ensures the user always starts with a fresh schedule unless they refresh during active playback.
-            const shouldRegeneratePlaylist = initialPlaylist.length === 0 || !initialPlaybackState?.isPlaying;
-
-            if (shouldRegeneratePlaylist) {
-                const now = new Date();
-                const currentHour = now.getHours();
-                const block = findBlockForHour(initialSchedule, currentHour, now);
-                const policyForGeneration = { ...defaultPlayoutPolicy, ...initialSettings.playoutPolicy };
-                const minutes = now.getMinutes();
-                const seconds = now.getSeconds();
-                const secondsRemainingInHour = 3600 - (minutes * 60 + seconds);
-                
-                let generatedPlaylist: SequenceItem[] = [];
-
-                if (block) { // Primary method: Scheduled block
-                    if (block.type === 'sequence' && block.sequenceItems) {
-                        generatedPlaylist = resolveSequenceItems(block.sequenceItems, initialLibrary, policyForGeneration, []);
-                    } else if (block.type === 'folder' && block.folderId) {
-                        generatedPlaylist = generatePlaylistFromFolder(block.folderId, initialLibrary, policyForGeneration, [], secondsRemainingInHour);
-                    }
-
-                    const initialDuration = generatedPlaylist.reduce((sum, item) => {
-                        if (item.type !== 'marker' && item.type !== 'clock_start_marker' && item.type !== 'random_from_folder' && item.type !== 'random_from_tag' && item.type !== 'autofill_marker') {
-                            return sum + (item as Track).duration;
-                        }
-                        return sum;
-                    }, 0);
-
-                    if (policyForGeneration.autoFillPlaylist && initialDuration > 0 && initialDuration < secondsRemainingInHour) {
-                        const remainingDuration = secondsRemainingInHour - initialDuration;
-                        const autoTracks = generatePlaylistFromTags(policyForGeneration.autoFillTags, initialLibrary, policyForGeneration, [], remainingDuration);
-            
-                        if (autoTracks.length > 0) {
-                            const autoFillMarker: AutoFillMarker = {
-                                id: `autofill-${Date.now()}`,
-                                type: 'autofill_marker',
-                                title: `Auto-filled from '${policyForGeneration.autoFillTags.join(', ')}' tag(s)`
-                            };
-                            generatedPlaylist = [...generatedPlaylist, autoFillMarker, ...autoTracks];
-                        }
-                    }
-                } else { // Fallback method: 'auto' tag
-                    generatedPlaylist = generatePlaylistFromTags(policyForGeneration.autoFillTags, initialLibrary, policyForGeneration, [], secondsRemainingInHour);
-                }
-
-                if (generatedPlaylist.length > 0) {
-                    const newMarker: ClockStartMarker = {
-                        id: `clock-start-${currentHour}-${Date.now()}`,
-                        type: 'clock_start_marker',
-                        hour: currentHour,
-                        title: block?.title || 'Auto-Filled Playlist',
-                        loadMode: block?.loadMode || 'soft',
-                    };
-                    generatedPlaylist.unshift(newMarker);
-                    
-                    setPlaylist(generatedPlaylist);
-                    const firstPlayableIndex = generatedPlaylist.findIndex(item => item.type !== 'marker' && item.type !== 'clock_start_marker' && item.type !== 'random_from_folder' && item.type !== 'random_from_tag' && item.type !== 'autofill_marker');
-                    
-                    if (firstPlayableIndex > -1) {
-                        setCurrentTrackIndex(firstPlayableIndex);
-                        setStopAfterTrackId(null);
-                        // Always start in a paused state after a fresh regeneration
-                        setCurrentPlayingItemId(null);
-                        setIsPlaying(false);
-                    }
-                } else {
-                    // If regeneration yields no tracks, start with an empty playlist.
-                    setPlaylist([]);
-                    setCurrentTrackIndex(0);
-                    setCurrentPlayingItemId(null);
-                    setIsPlaying(false);
-                    setStopAfterTrackId(null);
-                }
-            } else {
-                // --- Restore saved state because playback was active on refresh ---
-                setPlaylist(initialPlaylist);
-                if (initialPlaybackState) {
-                    setIsPlaying(initialPlaybackState.isPlaying ?? false);
-                    setCurrentPlayingItemId(initialPlaybackState.currentPlayingItemId ?? null);
-                    setCurrentTrackIndex(initialPlaybackState.currentTrackIndex ?? 0);
-                    setStopAfterTrackId(initialPlaybackState.stopAfterTrackId ?? null);
-                } else if (initialPlaylist.length > 0) {
-                    const firstPlayableIndex = initialPlaylist.findIndex(item => item.type !== 'marker' && item.type !== 'clock_start_marker' && item.type !== 'autofill_marker' && item.type !== 'random_from_folder' && item.type !== 'random_from_tag');
-                    setCurrentTrackIndex(firstPlayableIndex > -1 ? firstPlayableIndex : 0);
-                    setCurrentPlayingItemId(null);
-                    setIsPlaying(false);
-                    setStopAfterTrackId(null);
-                }
+            // --- Load playlist and playback state ---
+            setPlaylist(initialPlaylist);
+            if (initialPlaybackState && initialPlaybackState.isPlaying) {
+                // Restore saved state because playback was active on refresh
+                setIsPlaying(initialPlaybackState.isPlaying ?? false);
+                setCurrentPlayingItemId(initialPlaybackState.currentPlayingItemId ?? null);
+                setCurrentTrackIndex(initialPlaybackState.currentTrackIndex ?? 0);
+                setStopAfterTrackId(initialPlaybackState.stopAfterTrackId ?? null);
+            } else if (initialPlaylist.length > 0) {
+                // If not playing or no state, start at the beginning, paused
+                const firstPlayableIndex = initialPlaylist.findIndex(item => item.type !== 'marker');
+                setCurrentTrackIndex(firstPlayableIndex > -1 ? firstPlayableIndex : 0);
+                setCurrentPlayingItemId(null);
+                setIsPlaying(false);
+                setStopAfterTrackId(null);
             }
         };
 
@@ -942,7 +741,6 @@ const AppInternal: React.FC = () => {
     useDebouncedEffect(() => {
         const settingsToSave = { 
             playoutPolicy, 
-            isAutoplayEnabled,
             logoSrc, 
             headerGradient, 
             isNowPlayingExportEnabled,
@@ -969,12 +767,15 @@ const AppInternal: React.FC = () => {
             localStorage.setItem(GUEST_SETTINGS_KEY, JSON.stringify(settingsToSave));
             localStorage.setItem(GUEST_AUDIO_CONFIG_KEY, JSON.stringify({ buses: audioBuses, mixer: mixerConfig }));
         }
-    }, [playoutPolicy, isAutoplayEnabled, logoSrc, headerGradient, isNowPlayingExportEnabled, metadataFormat, columnWidths, isMicPanelCollapsed, isHeaderCollapsed, isLibraryCollapsed, currentUser, audioBuses, mixerConfig, isAutoBackupEnabled, isAutoBackupOnStartupEnabled, autoBackupInterval], 500);
+    }, [playoutPolicy, logoSrc, headerGradient, isNowPlayingExportEnabled, metadataFormat, columnWidths, isMicPanelCollapsed, isHeaderCollapsed, isLibraryCollapsed, currentUser, audioBuses, mixerConfig, isAutoBackupEnabled, isAutoBackupOnStartupEnabled, autoBackupInterval], 500);
 
     useDebouncedEffect(() => {
         const playlistToSave = playlist.filter(item => {
+            if (item.type === 'marker') {
+                return true;
+            }
             // Do not persist local files with temporary object URLs
-            if (item.type !== 'marker' && item.type !== 'clock_start_marker' && item.type !== 'random_from_folder' && item.type !== 'random_from_tag' && item.type !== 'autofill_marker' && item.type === TrackType.LOCAL_FILE) {
+            if (item.type === TrackType.LOCAL_FILE) {
                 return false; 
             }
             return true;
@@ -1000,16 +801,6 @@ const AppInternal: React.FC = () => {
     }, [cartwallCategories, currentUser], 500);
     
     useDebouncedEffect(() => {
-        if (currentUser) {
-            const allSchedules = JSON.parse(localStorage.getItem(USER_SCHEDULES_STORAGE_KEY) || '{}');
-            allSchedules[currentUser.email] = schedule;
-            localStorage.setItem(USER_SCHEDULES_STORAGE_KEY, JSON.stringify(allSchedules));
-        } else {
-            localStorage.setItem(GUEST_SCHEDULE_KEY, JSON.stringify(schedule));
-        }
-    }, [schedule, currentUser], 500);
-
-    useDebouncedEffect(() => {
         const playbackState = {
             isPlaying,
             currentPlayingItemId,
@@ -1031,9 +822,8 @@ const AppInternal: React.FC = () => {
         return () => {
             // This cleanup runs when the App component unmounts.
             playlistRef.current.forEach(item => {
-                 const track = item as Track;
-                if (track.src && track.src.startsWith('blob:')) {
-                    URL.revokeObjectURL(track.src);
+                if (item.type !== 'marker' && item.src && item.src.startsWith('blob:')) {
+                    URL.revokeObjectURL(item.src);
                 }
             });
             if (playerAUrlRef.current) URL.revokeObjectURL(playerAUrlRef.current);
@@ -1051,31 +841,21 @@ const AppInternal: React.FC = () => {
         };
     }, []);
 
-    const findNextPlayableIndex = useCallback((startIndex: number, direction: number = 1, sourcePlaylist?: SequenceItem[], noLoop = false): number => {
-        const listToSearch = sourcePlaylist || playlistRef.current;
+    const findNextPlayableIndex = useCallback((startIndex: number, direction: number = 1): number => {
+        const listToSearch = playlistRef.current;
+        const currentTimeline = timelineRef.current;
         const len = listToSearch.length;
         if (len === 0) return -1;
-        const skippedIds = skippedItemIdsRef.current;
-
-        if (noLoop) {
-            let index = startIndex + direction;
-            while(index >= 0 && index < len) {
-                const item = listToSearch[index];
-                if (!skippedIds.has(item.id) && item?.type !== 'marker' && item?.type !== 'clock_start_marker' && item?.type !== 'random_from_folder' && item?.type !== 'random_from_tag' && item?.type !== 'autofill_marker') {
-                    return index;
-                }
-                index += direction;
-            }
-            return -1; // Reached end, no playable track found
-        } 
-        
-        // Looping logic (original)
+    
         let nextIndex = startIndex;
         for (let i = 0; i < len; i++) {
             nextIndex = (nextIndex + direction + len) % len;
             const item = listToSearch[nextIndex];
-            if (!skippedIds.has(item.id) && item?.type !== 'marker' && item?.type !== 'clock_start_marker' && item?.type !== 'random_from_folder' && item?.type !== 'random_from_tag' && item?.type !== 'autofill_marker') {
-                return nextIndex;
+            if (item && item.type !== 'marker') {
+                const timelineData = currentTimeline.get(item.id);
+                if (!timelineData || !timelineData.isSkipped) {
+                    return nextIndex;
+                }
             }
         }
         return -1; // No playable item found in the whole list
@@ -1095,52 +875,53 @@ const AppInternal: React.FC = () => {
         setPflTrackId(null);
         setPflProgress(0);
     }, []);
+    
+    const handleSetCurrentTrack = (newIndex: number, source: 'manual' | 'auto-next' | 'marker-jump') => {
+        const currentPlaylist = playlistRef.current;
+        const oldIndex = currentTrackIndexRef.current;
+        const timeline = timelineRef.current;
+        const isForwardMove = newIndex > oldIndex;
 
-    const performHardLoad = useCallback((newPlaylist: SequenceItem[], play: boolean) => {
-        stopPfl();
-        setPlaylist(newPlaylist);
-
-        const firstPlayableIndex = newPlaylist.findIndex(item => item.type !== 'marker' && item.type !== 'clock_start_marker' && item.type !== 'random_from_folder' && item.type !== 'random_from_tag' && item.type !== 'autofill_marker');
-        
-        // Stop current playback
-        playerARef.current?.pause();
-        playerBRef.current?.pause();
-        if (playerARef.current) playerARef.current.src = '';
-        if (playerBRef.current) playerBRef.current.src = '';
-        playerALoadedIdRef.current = null;
-        playerBLoadedIdRef.current = null;
-
-        if (firstPlayableIndex > -1) {
-            setCurrentTrackIndex(firstPlayableIndex);
-            setTrackProgress(0);
-            if (play && isAutoplayEnabledRef.current) {
-                setIsPlaying(true);
-                setCurrentPlayingItemId(newPlaylist[firstPlayableIndex].id);
-            } else {
-                 setIsPlaying(false);
-                 setCurrentPlayingItemId(null);
-            }
-        } else {
-            // No playable tracks in new playlist
+        // Policy 1: User has 'Remove Played Tracks' enabled and we are moving forward.
+        if (playoutPolicyRef.current.removePlayedTracks && isForwardMove) {
+            const newPlaylist = currentPlaylist.slice(newIndex);
+            setPlaylist(newPlaylist);
             setCurrentTrackIndex(0);
-            setIsPlaying(false);
-            setCurrentPlayingItemId(null);
-            setTrackProgress(0);
+            return; // This policy takes precedence.
         }
-        setStopAfterTrackId(null);
-    }, [stopPfl]);
+
+        // Policy 2: The move skipped over markers or greyed-out items, triggering a cleanup.
+        // This runs only if Policy 1 is false.
+        let shouldCleanup = false;
+        // For auto-next, we only care about what's between the last track and the new one.
+        // For a manual click or hard marker jump, we clean up everything before the new track.
+        const checkStartIndex = (source === 'auto-next') ? oldIndex + 1 : 0;
+        
+        if ((isForwardMove || source === 'manual') && newIndex > -1) {
+             for (let i = checkStartIndex; i < newIndex; i++) {
+                const item = currentPlaylist[i];
+                if (!item) continue;
+                if (item.type === 'marker' || timeline.get(item.id)?.isSkipped) {
+                    shouldCleanup = true;
+                    break;
+                }
+            }
+        }
+       
+        if (shouldCleanup) {
+            const newPlaylist = currentPlaylist.slice(newIndex);
+            setPlaylist(newPlaylist);
+            setCurrentTrackIndex(0);
+        } else {
+            setCurrentTrackIndex(newIndex);
+        }
+    };
 
     const handleNext = useCallback(() => {
         const nextIndex = findNextPlayableIndex(currentTrackIndexRef.current, 1);
     
         if (nextIndex !== -1) {
-            if (playoutPolicyRef.current.removePlayedTracks && nextIndex > currentTrackIndexRef.current) {
-                const newPlaylist = playlistRef.current.slice(nextIndex);
-                setPlaylist(newPlaylist);
-                setCurrentTrackIndex(0);
-            } else {
-                setCurrentTrackIndex(nextIndex);
-            }
+            handleSetCurrentTrack(nextIndex, 'auto-next');
             setActivePlayer(p => p === 'A' ? 'B' : 'A');
         } else {
             // Playlist ended
@@ -1189,24 +970,15 @@ const AppInternal: React.FC = () => {
         if (targetIndex === -1) return;
 
         const newTrack = playlistRef.current[targetIndex];
-        if (newTrack?.type === 'marker' || newTrack?.type === 'clock_start_marker' || newTrack?.type === 'random_from_folder' || newTrack?.type === 'random_from_tag' || newTrack?.type === 'autofill_marker') return;
+        if (newTrack.type === 'marker') return;
 
         stopPfl();
         
-        const isForwardJump = targetIndex > currentTrackIndexRef.current;
+        handleSetCurrentTrack(targetIndex, 'manual');
 
-        if (playoutPolicyRef.current.removePlayedTracks && isForwardJump) {
-            const newPlaylist = playlistRef.current.slice(targetIndex);
-            setPlaylist(newPlaylist);
-            // After slicing, the target track is at index 0
-            setCurrentTrackIndex(0);
-        } else {
-            setCurrentTrackIndex(targetIndex);
-        }
-
-        if (currentTrackIndexRef.current !== targetIndex) {
-             setActivePlayer(p => p === 'A' ? 'B' : 'A');
-        }
+        // Always switch player when jumping to a new track this way
+        setActivePlayer(p => p === 'A' ? 'B' : 'A');
+        
         setCurrentPlayingItemId(newTrack.id);
         setIsPlaying(true);
     }, [stopPfl]);
@@ -1379,31 +1151,6 @@ const AppInternal: React.FC = () => {
         };
     }, []);
 
-    type NextAction = 
-        | { type: 'STOP' }
-        | { type: 'JUMP', index: number }
-        | { type: 'LOAD_CLOCK', fromIndex: number };
-
-    const determineNextAction = useCallback((currentIndex: number, currentPlaylist: SequenceItem[]): NextAction => {
-        // 1. Check for a soft clock change first.
-        const nextSoftClockMarkerIndex = currentPlaylist.findIndex((item, i) =>
-            i > currentIndex && item.type === 'clock_start_marker' && item.loadMode === 'soft'
-        );
-        if (nextSoftClockMarkerIndex !== -1) {
-            return { type: 'LOAD_CLOCK', fromIndex: nextSoftClockMarkerIndex };
-        }
-    
-        // 2. Find the simple next playable track.
-        const simpleNextIndex = findNextPlayableIndex(currentIndex, 1, currentPlaylist);
-    
-        if (simpleNextIndex !== -1 && simpleNextIndex !== currentIndex) { // ensure it's not looping on a single track playlist
-            return { type: 'JUMP', index: simpleNextIndex };
-        }
-        
-        // 3. No next track at all.
-        return { type: 'STOP' };
-    }, [findNextPlayableIndex]);
-
     const performCrossfade = useCallback(async (nextIndex: number) => {
         const graph = audioGraphRef.current;
         const playerMixerNode = graph.playerMixerNode;
@@ -1422,12 +1169,12 @@ const AppInternal: React.FC = () => {
         const inactiveLoadedIdRef = activePlayer === 'A' ? playerBLoadedIdRef : playerALoadedIdRef;
     
         const nextItem = playlistRef.current[nextIndex];
-        if (!nextItem || nextItem.type === 'marker' || nextItem.type === 'clock_start_marker' || nextItem.type === 'random_from_folder' || nextItem.type === 'random_from_tag' || nextItem.type === 'autofill_marker') {
+        if (!nextItem || nextItem.type === 'marker') {
             isCrossfadingRef.current = false;
             return;
         }
     
-        const src = await getTrackSrc(nextItem as Track);
+        const src = await getTrackSrc(nextItem);
         const inactivePlayer = inactivePlayerRef.current;
     
         if (!src || !inactivePlayer) {
@@ -1462,20 +1209,14 @@ const AppInternal: React.FC = () => {
                 const oldPlaylist = playlistRef.current;
                 const endedItem = oldPlaylist[oldIndex];
                 
-                if (endedItem.type !== 'marker' && endedItem.type !== 'clock_start_marker' && endedItem.type !== 'random_from_folder' && endedItem.type !== 'random_from_tag' && endedItem.type !== 'autofill_marker') {
+                if (endedItem && endedItem.type !== 'marker') {
                     setPlayoutHistory(prev => [...prev, { trackId: endedItem.id, title: endedItem.title, artist: endedItem.artist, playedAt: Date.now() }].slice(-100));
                 }
 
                 setCurrentPlayingItemId(nextItem.id);
                 setActivePlayer(p => p === 'A' ? 'B' : 'A');
-
-                if (playoutPolicyRef.current.removePlayedTracks) {
-                    const newPlaylist = playlistRef.current.slice(nextIndex);
-                    setPlaylist(newPlaylist);
-                    setCurrentTrackIndex(0);
-                } else {
-                    setCurrentTrackIndex(nextIndex);
-                }
+                
+                handleSetCurrentTrack(nextIndex, 'auto-next');
 
                 isCrossfadingRef.current = false;
 
@@ -1497,7 +1238,7 @@ const AppInternal: React.FC = () => {
              if (isPlaying) {
                 stopPfl();
             }
-            if (!currentItem || currentItem.type === 'marker' || currentItem.type === 'clock_start_marker' || currentItem.type === 'random_from_folder' || currentItem.type === 'random_from_tag' || currentItem.type === 'autofill_marker') {
+            if (!currentTrack) {
                 if (isPlaying) setIsPlaying(false);
                  setCurrentPlayingItemId(null);
                 return;
@@ -1506,22 +1247,22 @@ const AppInternal: React.FC = () => {
             const currentPlayer = activePlayerRef.current;
             if (!currentPlayer) return;
 
-            if (activeLoadedIdRef.current !== currentItem.id) {
+            if (activeLoadedIdRef.current !== currentTrack.id) {
                 currentPlayer.pause();
                 
                 if (activeUrlRef.current && activeUrlRef.current.startsWith('blob:')) {
                     URL.revokeObjectURL(activeUrlRef.current);
                 }
                 
-                const src = await getTrackSrc(currentItem as Track);
+                const src = await getTrackSrc(currentTrack);
                 if (src) {
                     currentPlayer.src = src;
                     activeUrlRef.current = src;
-                    activeLoadedIdRef.current = currentItem.id;
+                    activeLoadedIdRef.current = currentTrack.id;
                     currentPlayer.load();
                 } else {
-                    console.error(`Could not load track: ${currentItem.title}`);
-                    if (isAutoplayEnabledRef.current) handleNext(); // Fallback to simple next
+                    console.error(`Could not load track: ${currentTrack.title}`);
+                    handleNext(); // Fallback to simple next
                     return;
                 }
             }
@@ -1529,7 +1270,7 @@ const AppInternal: React.FC = () => {
             if (isPlaying && currentPlayer.paused) {
                 try {
                     await currentPlayer.play();
-                    setCurrentPlayingItemId(currentItem.id);
+                    setCurrentPlayingItemId(currentTrack.id);
                 } catch (e) {
                     console.error("Playback failed:", e);
                     setIsPlaying(false);
@@ -1542,100 +1283,104 @@ const AppInternal: React.FC = () => {
 
         loadAndPlay();
         
-    }, [currentItem, isPlaying, activePlayer, handleNext, getTrackSrc, stopPfl]);
+    }, [currentTrack, isPlaying, activePlayer, handleNext, getTrackSrc, stopPfl]);
 
     const timeline = useMemo(() => {
         const timelineMap = new Map<string, { startTime: Date, endTime: Date, duration: number, isSkipped?: boolean, shortenedBy?: number }>();
         if (playlist.length === 0) return timelineMap;
 
-        let currentTime = new Date().getTime();
-        const playingIndex = playlist.findIndex(item => item.id === currentPlayingItemId);
+        // Pre-calculation: determine which tracks are skipped by a passed soft marker
+        const softSkippedIds = new Set<string>();
+        const now = Date.now();
+        const nowPlayingIndex = currentPlayingItemId ? playlist.findIndex(item => item.id === currentPlayingItemId) : -1;
 
-        if (playingIndex !== -1) {
-            currentTime -= (trackProgress * 1000);
-        }
-
-        const getTrackDuration = (item: SequenceItem): number => {
-            if (item.type !== 'marker' && item.type !== 'clock_start_marker' && item.type !== 'autofill_marker' && item.type !== 'random_from_folder' && item.type !== 'random_from_tag') {
-                return (item as Track).duration * 1000;
+        let lastPassedSoftMarkerIndex = -1;
+        playlist.forEach((item, index) => {
+            if (item.type === 'marker' && item.markerType === TimeMarkerType.SOFT && item.time < now) {
+                lastPassedSoftMarkerIndex = index;
             }
-            return 0;
-        };
+        });
 
-        // Find the first hard marker in the future to calculate shortening
-        let firstHardMarker: { item: TimeFixMarker; time: Date } | null = null;
-        for (const item of playlist) {
-            if (item.type === 'marker' && item.markerType === 'hard') {
-                const [h, m, s] = item.time.split(':').map(Number);
-                const markerTime = new Date();
-                markerTime.setHours(h, m, s || 0, 0);
-                if (markerTime < new Date()) {
-                    markerTime.setDate(markerTime.getDate() + 1);
+        if (lastPassedSoftMarkerIndex > nowPlayingIndex) {
+            const startIndex = nowPlayingIndex === -1 ? 0 : nowPlayingIndex + 1;
+            for (let i = startIndex; i < lastPassedSoftMarkerIndex; i++) {
+                const item = playlist[i];
+                if (item.type !== 'marker') {
+                    softSkippedIds.add(item.id);
                 }
-                firstHardMarker = { item, time: markerTime };
-                break;
             }
         }
-        
-        // Calculate forwards from current track
-        let forwardTime = currentTime;
-        for (let i = playingIndex; i < playlist.length; i++) {
-            if (i < 0) continue;
-            const item = playlist[i];
-            const isSkipped = skippedItemIds.has(item.id);
 
+        let calculationStartTime = Date.now();
+        if (currentPlayingItemId) {
+            const nowPlayingIndex = playlist.findIndex(item => item.id === currentPlayingItemId);
+             if (nowPlayingIndex > -1) {
+                let timeBeforeCurrent = 0;
+                for (let i = 0; i < nowPlayingIndex; i++) {
+                    const item = playlist[i];
+                    if (item.type !== 'marker' && !softSkippedIds.has(item.id)) {
+                        const nextHardMarkerIndex = playlist.findIndex((nextItem, index) => index > i && nextItem.type === 'marker' && nextItem.markerType === TimeMarkerType.HARD);
+                        let duration = item.duration;
+                        if (nextHardMarkerIndex > -1) {
+                            const nextMarker = playlist[nextHardMarkerIndex] as TimeMarker;
+                            const naturalEndTime = (calculationStartTime + (timeBeforeCurrent + duration) * 1000);
+                            if (nextMarker.time < naturalEndTime) {
+                                duration = Math.max(0, (nextMarker.time - (calculationStartTime + timeBeforeCurrent * 1000)) / 1000);
+                            }
+                        }
+                        timeBeforeCurrent += duration;
+                    }
+                }
+                 calculationStartTime = Date.now() - (trackProgress * 1000) - timeBeforeCurrent;
+            }
+        }
+    
+        let playhead = calculationStartTime;
+    
+        for (let i = 0; i < playlist.length; i++) {
+            const item = playlist[i];
+            
             if (item.type === 'marker') {
-                const [hours, minutes, seconds] = item.time.split(':').map(Number);
-                const markerTimeDate = new Date(forwardTime);
-                markerTimeDate.setHours(hours, minutes, seconds || 0, 0);
-                
-                if (markerTimeDate.getTime() < forwardTime) {
-                    markerTimeDate.setDate(markerTimeDate.getDate() + 1);
-                }
-
-                if (item.markerType === 'hard') {
-                    forwardTime = markerTimeDate.getTime();
-                } else { // Soft marker
-                    forwardTime = Math.max(forwardTime, markerTimeDate.getTime());
-                }
-                timelineMap.set(item.id, { startTime: new Date(forwardTime), endTime: new Date(forwardTime), duration: 0, isSkipped });
-
+                const marker = item;
+                playhead = Math.max(playhead, marker.time);
             } else {
-                const originalDuration = getTrackDuration(item);
-                const startTimeMs = forwardTime;
-                let endTimeMs = forwardTime + (isSkipped ? 0 : originalDuration);
-                let shortenedBy: number | undefined = undefined;
-
-                if (firstHardMarker && !isSkipped && startTimeMs < firstHardMarker.time.getTime() && endTimeMs > firstHardMarker.time.getTime()) {
-                    shortenedBy = (endTimeMs - firstHardMarker.time.getTime()) / 1000;
-                    endTimeMs = firstHardMarker.time.getTime();
+                const track = item;
+                const startTime = playhead;
+                const naturalEndTime = startTime + track.duration * 1000;
+                let finalEndTime = naturalEndTime;
+                let shortenedBy = 0;
+                
+                const nextHardMarkerIndex = playlist.findIndex((nextItem, index) => 
+                    index > i && nextItem.type === 'marker' && nextItem.markerType === TimeMarkerType.HARD
+                );
+                if (nextHardMarkerIndex > -1) {
+                    const nextMarker = playlist[nextHardMarkerIndex] as TimeMarker;
+                    if (nextMarker.time < naturalEndTime) {
+                        finalEndTime = nextMarker.time;
+                        shortenedBy = (naturalEndTime - finalEndTime) / 1000;
+                    }
                 }
-
-                timelineMap.set(item.id, {
-                    startTime: new Date(startTimeMs),
-                    endTime: new Date(endTimeMs),
-                    duration: (endTimeMs - startTimeMs) / 1000,
-                    isSkipped,
-                    shortenedBy
+    
+                const isSkippedByTiming = startTime >= finalEndTime;
+                const isSkippedBySoftMarker = softSkippedIds.has(track.id);
+                const isSkipped = isSkippedByTiming || isSkippedBySoftMarker;
+    
+                timelineMap.set(track.id, {
+                    startTime: new Date(startTime),
+                    endTime: new Date(finalEndTime),
+                    duration: isSkipped ? 0 : (finalEndTime - startTime) / 1000,
+                    isSkipped: isSkipped,
+                    shortenedBy: shortenedBy > 0.1 ? shortenedBy : 0,
                 });
-                forwardTime = endTimeMs;
+                
+                if (!isSkipped) {
+                    playhead = finalEndTime;
+                }
             }
-        }
-
-        // Calculate backwards from current track
-        let backwardTime = currentTime;
-        for (let i = playingIndex - 1; i >= 0; i--) {
-            const item = playlist[i];
-            const itemDuration = getTrackDuration(item);
-            const startTime = new Date(backwardTime - itemDuration);
-            const endTime = new Date(backwardTime);
-            timelineMap.set(item.id, { startTime, endTime, duration: itemDuration / 1000 });
-            backwardTime = startTime.getTime();
         }
         
         return timelineMap;
-    }, [playlist, currentPlayingItemId, trackProgress, skippedItemIds]);
-    const timelineRef = useRef(timeline);
+    }, [playlist, currentPlayingItemId, trackProgress]);
     timelineRef.current = timeline;
 
     // Effect for player event listeners (time updates, track end)
@@ -1651,9 +1396,9 @@ const AppInternal: React.FC = () => {
 
                 const policy = playoutPolicyRef.current;
                 if (policy.crossfadeEnabled && !isCrossfadingRef.current && player.duration > 0 && player.duration - player.currentTime < policy.crossfadeDuration) {
-                     const nextAction = determineNextAction(currentTrackIndexRef.current, playlistRef.current);
-                     if (nextAction.type === 'JUMP') {
-                        performCrossfade(nextAction.index);
+                     const nextIndex = findNextPlayableIndex(currentTrackIndexRef.current, 1);
+                     if (nextIndex !== -1 && nextIndex !== currentTrackIndexRef.current) {
+                        performCrossfade(nextIndex);
                     }
                 }
             }
@@ -1673,11 +1418,9 @@ const AppInternal: React.FC = () => {
             if (player !== activePlayerRef.current || isCrossfadingRef.current) return;
             
             const endedItem = playlistRef.current[currentTrackIndexRef.current];
-            if (!endedItem) return;
+            if (!endedItem || endedItem.type === 'marker') return;
             
-            if (endedItem.type !== 'marker' && endedItem.type !== 'clock_start_marker' && endedItem.type !== 'random_from_folder' && endedItem.type !== 'random_from_tag' && endedItem.type !== 'autofill_marker') {
-                setPlayoutHistory(prev => [...prev, { trackId: endedItem.id, title: endedItem.title, artist: endedItem.artist, playedAt: Date.now() }].slice(-100));
-            }
+            setPlayoutHistory(prev => [...prev, { trackId: endedItem.id, title: endedItem.title, artist: endedItem.artist, playedAt: Date.now() }].slice(-100));
             
             if (stopAfterTrackIdRef.current && stopAfterTrackIdRef.current === endedItem.id) {
                 setIsPlaying(false); setStopAfterTrackId(null);
@@ -1685,78 +1428,47 @@ const AppInternal: React.FC = () => {
                 return;
             }
 
-            // --- SOFT MARKER JUMP LOGIC ---
-            const activeSoftMarkerIndex = playlistRef.current.findIndex((item, i) =>
-                item.type === 'marker' && item.markerType === 'soft' && i > currentTrackIndexRef.current
-            );
-            
-            if (activeSoftMarkerIndex !== -1) {
-                const timelineData = timelineRef.current.get(playlistRef.current[activeSoftMarkerIndex].id);
-                if (timelineData && timelineData.startTime <= new Date()) {
-                    const nextIndexAfterMarker = findNextPlayableIndex(activeSoftMarkerIndex, 1);
-                    if (nextIndexAfterMarker !== -1) {
-                        setCurrentTrackIndex(nextIndexAfterMarker);
-                        setActivePlayer(p => p === 'A' ? 'B' : 'A');
-                        return;
+            const endedIndex = currentTrackIndexRef.current;
+            const currentPlaylist = playlistRef.current;
+            const currentTimeline = timelineRef.current;
+            let nextIndex = -1;
+
+            // --- START OF FIX: Address race condition for soft markers ---
+            // The timeline from the ref might be stale regarding time-sensitive soft markers.
+            // We perform a fresh check here to ensure correctness at the exact moment a track ends.
+            const now = Date.now();
+            let lastPassedSoftMarkerIndex = -1;
+            currentPlaylist.forEach((item, index) => {
+                if (item.type === 'marker' && item.markerType === TimeMarkerType.SOFT && item.time < now) {
+                    lastPassedSoftMarkerIndex = index;
+                }
+            });
+            // --- END OF FIX ---
+
+            for (let i = endedIndex + 1; i < currentPlaylist.length; i++) {
+                const item = currentPlaylist[i];
+                if (item.type !== 'marker') {
+                    // A track is skipped if EITHER a hard marker has forced it out (a structural skip, safe to read from ref)
+                    // OR a soft marker's time has just passed (a time-sensitive skip, needs a fresh check).
+                    const timelineData = currentTimeline.get(item.id);
+                    const isSkippedByHardMarker = timelineData ? timelineData.startTime >= timelineData.endTime : false;
+                    const isSkippedBySoftMarker = lastPassedSoftMarkerIndex > endedIndex && i < lastPassedSoftMarkerIndex;
+        
+                    if (!isSkippedByHardMarker && !isSkippedBySoftMarker) {
+                        nextIndex = i;
+                        break;
                     }
                 }
             }
-            // --- END SOFT MARKER JUMP LOGIC ---
 
-
-            if (!isAutoplayEnabledRef.current) { setIsPlaying(false); return; }
-
-            const currentIndex = currentTrackIndexRef.current;
-            const currentPlaylist = playlistRef.current;
-            const policy = playoutPolicyRef.current;
-
-            const nextAction = determineNextAction(currentIndex, currentPlaylist);
-            if (policy.removePlayedTracks) {
-                let nextIndex = -1;
-                if(nextAction.type === 'JUMP') nextIndex = nextAction.index;
-                if(nextAction.type === 'LOAD_CLOCK') nextIndex = nextAction.fromIndex;
-
-                if (nextIndex !== -1 && nextIndex > currentIndex) {
-                    const newPlaylist = currentPlaylist.slice(nextIndex);
-                    setPlaylist(newPlaylist);
-                    setCurrentTrackIndex(0);
-                    setActivePlayer(p => p === 'A' ? 'B' : 'A');
-                } else if (nextIndex !== -1) { // Loop back
-                    setCurrentTrackIndex(nextIndex);
-                    setActivePlayer(p => p === 'A' ? 'B' : 'A');
-                } else { // Stop
-                    setIsPlaying(false);
-                    setCurrentPlayingItemId(null);
-                    setPlaylist([]);
-                }
-
+            if (nextIndex !== -1) {
+                handleSetCurrentTrack(nextIndex, 'auto-next');
+                setActivePlayer(p => (p === 'A' ? 'B' : 'A'));
             } else {
-                switch (nextAction.type) {
-                    case 'STOP': {
-                        setIsPlaying(false);
-                        setCurrentPlayingItemId(null);
-                        setCurrentTrackIndex(0);
-                        break;
-                    }
-                    case 'JUMP': {
-                        setActivePlayer(p => p === 'A' ? 'B' : 'A');
-                        setCurrentTrackIndex(nextAction.index);
-                        break;
-                    }
-                    case 'LOAD_CLOCK': {
-                        const newClockPlaylist = currentPlaylist.slice(nextAction.fromIndex);
-                        const finalIndex = findNextPlayableIndex(-1, 1, newClockPlaylist);
-
-                        setPlaylist(newClockPlaylist);
-                        if (finalIndex !== -1) {
-                            setActivePlayer(p => p === 'A' ? 'B' : 'A');
-                            setCurrentTrackIndex(finalIndex);
-                        } else {
-                            setIsPlaying(false);
-                            setCurrentPlayingItemId(null);
-                        }
-                        break;
-                    }
+                setIsPlaying(false);
+                setCurrentPlayingItemId(null);
+                if (playoutPolicyRef.current.removePlayedTracks) {
+                    setPlaylist([]);
                 }
             }
         };
@@ -1764,7 +1476,79 @@ const AppInternal: React.FC = () => {
         const players = [playerA, playerB];
         players.forEach(p => { if (p) { p.addEventListener('timeupdate', handleTimeUpdate); p.addEventListener('ended', handleEnded); } });
         return () => { players.forEach(p => { if (p) { p.removeEventListener('timeupdate', handleTimeUpdate); p.removeEventListener('ended', handleEnded); } }); };
-    }, [activePlayer, findNextPlayableIndex, performCrossfade, determineNextAction]);
+    }, [activePlayer, findNextPlayableIndex, performCrossfade, handleNext]);
+
+    // --- Hard Marker Trigger Logic ---
+    const triggerHardMarkerFadeAndJump = useCallback(async (nextIndex: number) => {
+        if (isCrossfadingRef.current) return;
+        isCrossfadingRef.current = true;
+    
+        const graph = audioGraphRef.current;
+        if (!graph.context || !graph.playerMixerNode) {
+            isCrossfadingRef.current = false;
+            return;
+        }
+    
+        const FADE_DURATION = 0.8; // 800ms
+        const { context, playerMixerNode } = graph;
+        const now = context.currentTime;
+    
+        const gainAParam = playerMixerNode.parameters.get('gainA')!;
+        const gainBParam = playerMixerNode.parameters.get('gainB')!;
+        const activeParam = activePlayer === 'A' ? gainAParam : gainBParam;
+    
+        activeParam.cancelScheduledValues(now);
+        activeParam.linearRampToValueAtTime(0, now + FADE_DURATION);
+    
+        setTimeout(() => {
+            const endedItem = playlistRef.current[currentTrackIndexRef.current];
+            if (endedItem && endedItem.type !== 'marker') {
+                setPlayoutHistory(prev => [...prev, { trackId: endedItem.id, title: endedItem.title, artist: endedItem.artist, playedAt: Date.now() }].slice(-100));
+            }
+            
+            handleSetCurrentTrack(nextIndex, 'marker-jump');
+            setActivePlayer(p => (p === 'A' ? 'B' : 'A'));
+    
+            isCrossfadingRef.current = false;
+        }, FADE_DURATION * 1000);
+    
+    }, [activePlayer, setPlayoutHistory]);
+
+    useEffect(() => {
+        if (!isPlaying) return;
+    
+        const intervalId = setInterval(() => {
+            const now = Date.now();
+            const playlist = playlistRef.current;
+            const currentIdx = currentTrackIndexRef.current;
+    
+            let triggerMarker: TimeMarker | null = null;
+            let markerIndex = -1;
+    
+            // Find the latest hard marker that has passed
+            let latestHardMarkerTime = 0;
+            for (let i = 0; i < playlist.length; i++) {
+                const item = playlist[i];
+                if (item.type === 'marker' && item.markerType === TimeMarkerType.HARD && now >= item.time && item.time > latestHardMarkerTime) {
+                    triggerMarker = item;
+                    markerIndex = i;
+                    latestHardMarkerTime = item.time;
+                }
+            }
+    
+            if (triggerMarker && markerIndex > currentIdx) {
+                const nextPlayableIndex = findNextPlayableIndex(markerIndex, 1);
+                
+                if (nextPlayableIndex !== -1 && nextPlayableIndex !== currentIdx) {
+                    console.log(`[Hard Marker] Triggered at ${new Date(triggerMarker.time).toLocaleTimeString()}. Jumping to track index ${nextPlayableIndex}.`);
+                    triggerHardMarkerFadeAndJump(nextPlayableIndex);
+                }
+            }
+        }, 1000); 
+    
+        return () => clearInterval(intervalId);
+    
+    }, [isPlaying, findNextPlayableIndex, triggerHardMarkerFadeAndJump]);
 
     // Effect to manage mic send STATE based on live status for UI feedback
     useEffect(() => {
@@ -1840,359 +1624,7 @@ const AppInternal: React.FC = () => {
             gainAParam.linearRampToValueAtTime(0.0, now + 0.5);
         }
     }, [activePlayer]);
-
-    // Effect for Hard Time Fix Markers
-    useEffect(() => {
-        if (!isPlaying) return;
-
-        const timer = setInterval(() => {
-            const now = new Date();
-            const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-            const currentPlaylist = playlistRef.current;
-            
-            const markerIndex = currentPlaylist.findIndex(item => 
-                item.type === 'marker' && 
-                item.markerType === 'hard' && 
-                item.time === currentTime &&
-                item.id !== lastTriggeredMarkerIdRef.current
-            );
-
-            if (markerIndex !== -1) {
-                const marker = currentPlaylist[markerIndex];
-                lastTriggeredMarkerIdRef.current = marker.id;
-                setTimeout(() => { if (lastTriggeredMarkerIdRef.current === marker.id) lastTriggeredMarkerIdRef.current = null; }, 61000);
-
-                const nextPlayableIndex = findNextPlayableIndex(markerIndex, 1);
-                if (nextPlayableIndex !== -1) {
-                     if (playoutPolicyRef.current.crossfadeEnabled) {
-                        performCrossfade(nextPlayableIndex);
-                     } else {
-                        const graph = audioGraphRef.current;
-                        const playerMixerNode = graph.playerMixerNode;
-                        const activePlayerRef = activePlayer === 'A' ? playerARef : playerBRef;
-                        
-                        if (graph.context && playerMixerNode) {
-                            const now = graph.context.currentTime;
-                            const activeParam = activePlayer === 'A' ? playerMixerNode.parameters.get('gainA')! : playerMixerNode.parameters.get('gainB')!;
-                            activeParam.cancelScheduledValues(now);
-                            activeParam.linearRampToValueAtTime(0, now + 0.5); // 0.5 second fade out
-                            
-                            setTimeout(() => {
-                                activePlayerRef.current?.pause();
-                                setActivePlayer(p => p === 'A' ? 'B' : 'A');
-                                setCurrentTrackIndex(nextPlayableIndex);
-                            }, 500);
-
-                        } else {
-                            // Fallback to hard stop if audio graph isn't ready
-                            activePlayerRef.current?.pause();
-                            setActivePlayer(p => p === 'A' ? 'B' : 'A');
-                            setCurrentTrackIndex(nextPlayableIndex);
-                        }
-                     }
-                }
-            }
-        }, 1000);
-
-        return () => clearInterval(timer);
-    }, [isPlaying, activePlayer, findNextPlayableIndex, performCrossfade]);
     
-    // Effect for managing skipped items based on markers
-    useEffect(() => {
-        const updateSkippedItems = () => {
-            const now = new Date();
-            const playlist = playlistRef.current;
-            const currentIndex = currentTrackIndexRef.current;
-
-            if (!isPlayingRef.current || currentIndex < 0 || currentIndex >= playlist.length) {
-                if (skippedItemIdsRef.current.size > 0) {
-                    setSkippedItemIds(new Set());
-                }
-                return;
-            }
-
-            const newSkippedIds = new Set<string>();
-
-            // Find the first marker of any type after the current track.
-            let firstMarkerIndex = -1;
-            let firstMarker: TimeFixMarker | null = null;
-            for (let i = currentIndex + 1; i < playlist.length; i++) {
-                const item = playlist[i];
-                if (item.type === 'marker') {
-                    firstMarkerIndex = i;
-                    firstMarker = item;
-                    break;
-                }
-            }
-            
-            if (firstMarker) {
-                let shouldSkip = false;
-                if (firstMarker.markerType === 'hard') {
-                    // Hard markers always cause a positional skip for items before them.
-                    shouldSkip = true;
-                } else { // Soft marker
-                    // Soft markers only skip if their time has been reached.
-                    const [h, m, s] = firstMarker.time.split(':').map(Number);
-                    const markerTime = new Date(now);
-                    markerTime.setHours(h, m, s || 0, 0);
-
-                    // Handle day rollover
-                    if (now.getTime() - markerTime.getTime() > 12 * 60 * 60 * 1000) {
-                        markerTime.setDate(markerTime.getDate() + 1);
-                    }
-
-                    if (now >= markerTime) {
-                        shouldSkip = true;
-                    }
-                }
-
-                if (shouldSkip) {
-                    // Mark all items between the current track and the marker as skipped.
-                    for (let j = currentIndex + 1; j < firstMarkerIndex; j++) {
-                        newSkippedIds.add(playlist[j].id);
-                    }
-                }
-            }
-
-            // Compare with current state to avoid unnecessary re-renders.
-            const currentSkipped = skippedItemIdsRef.current;
-            if (newSkippedIds.size !== currentSkipped.size || ![...newSkippedIds].every(id => currentSkipped.has(id))) {
-                setSkippedItemIds(newSkippedIds);
-            }
-        };
-
-        updateSkippedItems();
-        const timer = setInterval(updateSkippedItems, 2000);
-
-        return () => clearInterval(timer);
-    }, [playlist, currentTrackIndex, isPlaying]);
-    
-    const resolveSequenceItems = useCallback((
-        items: SequenceItem[], 
-        library: Folder,
-        policy?: PlayoutPolicy,
-        history?: PlayoutHistoryEntry[]
-    ): SequenceItem[] => {
-        const allTracks = getAllTracks(library);
-
-        const resolved = items.flatMap((item): SequenceItem | SequenceItem[] => {
-            if (item.type === 'marker' || item.type === 'clock_start_marker' || item.type === 'autofill_marker') {
-                return [item];
-            }
-    
-            if (item.type === 'random_from_folder') {
-                const folder = findFolderInTree(library, item.folderId);
-                if (!folder) return []; 
-                
-                let tracksInFolder = collectAllChildTracks(folder);
-                if (policy && history) {
-                    tracksInFolder = applySeparationPolicy(tracksInFolder, policy, history);
-                }
-                if (tracksInFolder.length === 0) return []; 
-                
-                const randomTrack = tracksInFolder[Math.floor(Math.random() * tracksInFolder.length)];
-                return randomTrack ? [randomTrack] : [];
-            }
-
-            if (item.type === 'random_from_tag') {
-                let taggedTracks = allTracks.filter(t => t.tags?.includes(item.tag));
-                 if (policy && history) {
-                    taggedTracks = applySeparationPolicy(taggedTracks, policy, history);
-                }
-                if (taggedTracks.length === 0) return [];
-
-                const randomTrack = taggedTracks[Math.floor(Math.random() * taggedTracks.length)];
-                return randomTrack ? [randomTrack] : [];
-            }
-    
-            const track = findTrackInTree(library, item.id);
-            return track ? [track] : [];
-        });
-    
-        return resolved.flat().filter((i): i is SequenceItem => i !== null);
-    }, []);
-
-    // --- AUTOMATION: Unified Timeline Manager ---
-    useEffect(() => {
-        const timelineAutomation = () => {
-            // Use refs for latest state without re-triggering the effect
-            const now = new Date();
-            const playlist = playlistRef.current;
-            const timelineMap = timelineRef.current;
-            const policy = playoutPolicyRef.current;
-            const schedule = scheduleRef.current;
-            const mediaLibrary = mediaLibraryRef.current;
-            const playoutHistory = playoutHistoryRef.current;
-            
-            // --- Priority 1: Pre-load scheduled clocks ---
-            for (const block of schedule) {
-                if (!block.preloadTime || block.preloadTime <= 0) continue;
-
-                const blockStartTime = new Date();
-                blockStartTime.setHours(block.hour, 0, 0, 0);
-
-                // If block hour is in the past for today, assume it's for tomorrow
-                if (blockStartTime < now) {
-                    blockStartTime.setDate(blockStartTime.getDate() + 1);
-                }
-                
-                // Check if this specific clock instance has already been loaded
-                const hasBeenLoaded = playlist.some(item => 
-                    item.type === 'clock_start_marker' && 
-                    item.hour === block.hour &&
-                    timelineMap.get(item.id)?.startTime.toDateString() === blockStartTime.toDateString()
-                );
-                
-                if (hasBeenLoaded) continue;
-
-                const preloadTimestamp = blockStartTime.getTime() - (block.preloadTime * 60 * 1000);
-
-                if (now.getTime() >= preloadTimestamp) {
-                    console.log(`[Automation] Pre-loading clock for ${block.hour}:00`);
-                    let generatedPlaylist: SequenceItem[] = [];
-                    const durationToGenerateSecs = 3600;
-
-                    if (block.type === 'sequence' && block.sequenceItems) {
-                        generatedPlaylist = resolveSequenceItems(block.sequenceItems, mediaLibrary, policy, playoutHistory);
-                    } else if (block.type === 'folder' && block.folderId) {
-                        generatedPlaylist = generatePlaylistFromFolder(block.folderId, mediaLibrary, policy, playoutHistory, durationToGenerateSecs);
-                    }
-                    
-                    if (generatedPlaylist.length > 0) {
-                        const newMarker: ClockStartMarker = {
-                            id: `clock-start-${block.hour}-${blockStartTime.getTime()}`,
-                            type: 'clock_start_marker', hour: block.hour, title: block.title || 'Scheduled Playlist', loadMode: block.loadMode || 'soft',
-                        };
-                        const finalPlaylist = [newMarker, ...generatedPlaylist];
-                        setPlaylist(prev => [...prev, ...finalPlaylist]);
-                        // Action taken, exit for this cycle
-                        return; 
-                    }
-                }
-            }
-
-            // --- Priority 2: Auto-fill if playlist is running short ---
-            if (!policy.autoFillPlaylist) {
-                return;
-            }
-
-            let playlistEndTime = new Date(now.getTime());
-            if (playlist.length > 0) {
-                const lastItemId = playlist[playlist.length - 1].id;
-                const lastItemTiming = timelineMap.get(lastItemId);
-                if (lastItemTiming) {
-                    playlistEndTime = lastItemTiming.endTime;
-                } else {
-                    // If timing info isn't ready, wait for the next cycle.
-                    return;
-                }
-            }
-            
-            const remainingDurationMs = playlistEndTime.getTime() - now.getTime();
-            const lookaheadMs = policy.autoFillLookahead * 60 * 1000;
-
-            if (remainingDurationMs > lookaheadMs) {
-                // Playlist is long enough, no need to auto-fill yet.
-                return;
-            }
-            
-            // Determine the point in time we need to generate content for.
-            const generationPointInTime = playlist.length > 0 ? new Date(playlistEndTime.getTime() + 1000) : now;
-            const hourToGenerate = generationPointInTime.getHours();
-            const dateToGenerate = generationPointInTime;
-
-            // PREVENT AUTO-FILL COLLISION: Check if the hour we're about to fill has a scheduled block.
-            const blockForNextHour = findBlockForHour(schedule, hourToGenerate, dateToGenerate);
-            if (blockForNextHour) {
-                console.log(`[Automation] Auto-fill paused. A scheduled block is coming up for ${hourToGenerate}:00.`);
-                return; // Let the pre-loader handle the upcoming scheduled block.
-            }
-            
-            // Check if the last item added was an autofill marker for this hour, to prevent duplicates
-            const lastItem = playlist.length > 0 ? playlist[playlist.length - 1] : null;
-            if(lastItem && lastItem.type === 'autofill_marker' && lastItem.title.includes(`${String(hourToGenerate).padStart(2, '0')}:00`)) {
-                return;
-            }
-
-            console.log(`[Automation] Playlist is short. Auto-filling for ${hourToGenerate}:00`);
-
-            // Calculate duration to fill until the end of the current hour.
-            const endOfHour = new Date(generationPointInTime);
-            endOfHour.setHours(generationPointInTime.getHours() + 1, 0, 0, 0);
-            const durationToGenerateSecs = Math.max(0, (endOfHour.getTime() - generationPointInTime.getTime()) / 1000);
-
-            if (durationToGenerateSecs < 60) { // Don't bother filling less than a minute.
-                return;
-            }
-
-            let generatedPlaylist = generatePlaylistFromTags(policy.autoFillTags, mediaLibrary, policy, playoutHistory, durationToGenerateSecs);
-            
-            if (generatedPlaylist.length > 0) {
-                const newMarker: AutoFillMarker = {
-                    id: `autofill-${hourToGenerate}-${Date.now()}`,
-                    type: 'autofill_marker',
-                    title: `Auto-filled for ${String(hourToGenerate).padStart(2, '0')}:00`
-                };
-                
-                const newAutoFilledIds = new Set(generatedPlaylist.map(t => t.id));
-                setAutoFilledItemIds(prev => new Set([...prev, ...newAutoFilledIds]));
-
-                const finalPlaylist = [newMarker, ...generatedPlaylist];
-                setPlaylist(prev => [...prev, ...finalPlaylist]);
-            }
-        };
-
-        // Run automation shortly after startup and then on a regular interval.
-        const initialTimeout = setTimeout(timelineAutomation, 5000);
-        const interval = setInterval(timelineAutomation, 10000); // Check every 10 seconds
-
-        return () => {
-            clearTimeout(initialTimeout);
-            clearInterval(interval);
-        };
-    }, [resolveSequenceItems]);
-
-
-    // Effect for Hard Clock Execution
-    useEffect(() => {
-        if (!isPlaying) return;
-
-        const timer = setInterval(() => {
-            const now = new Date();
-            // Trigger at the top of the hour
-            if (now.getMinutes() !== 0 || now.getSeconds() > 2) return;
-
-            const currentPlaylist = playlistRef.current;
-            const markerIndex = currentPlaylist.findIndex(item =>
-                item.type === 'clock_start_marker' &&
-                item.hour === now.getHours() &&
-                item.loadMode === 'hard'
-            );
-
-            if (markerIndex !== -1 && markerIndex > 0) { // Ensure it's not the very first item
-                const newPlaylist = currentPlaylist.slice(markerIndex);
-                const nextPlayableIndexInNew = findNextPlayableIndex(-1, 1, newPlaylist);
-
-                if (nextPlayableIndexInNew !== -1) {
-                    if (playoutPolicyRef.current.crossfadeEnabled) {
-                        const absoluteNextIndex = markerIndex + nextPlayableIndexInNew;
-                        performCrossfade(absoluteNextIndex);
-
-                        // Schedule playlist update after crossfade completes
-                        setTimeout(() => {
-                            setPlaylist(newPlaylist);
-                            setCurrentTrackIndex(nextPlayableIndexInNew);
-                        }, (playoutPolicyRef.current.crossfadeDuration * 1000) + 150);
-                    } else {
-                         performHardLoad(newPlaylist, true);
-                    }
-                }
-            }
-        }, 1000);
-
-        return () => clearInterval(timer);
-    }, [isPlaying, activePlayer, findNextPlayableIndex, performCrossfade, performHardLoad]);
-
     // --- NEW AUDIO MIXER EFFECTS ---
 
     // Effect to connect mic stream to graph
@@ -2417,18 +1849,24 @@ const AppInternal: React.FC = () => {
 
     // --- Playlist & Library Handlers ---
     const handleAddToPlaylist = useCallback((track: Track) => {
-        setPlaylist(prev => [...prev, track]);
+        setPlaylist(prev => {
+            // When user adds a track, remove any auto-filled tracks
+            const manualTracks = prev.filter(t => t.type !== 'marker' && t.addedBy !== 'auto-fill');
+            return [...manualTracks, { ...track, addedBy: 'user' }];
+        });
     }, []);
 
     const handleInsertTrackInPlaylist = useCallback((track: Track, beforeItemId: string | null) => {
         setPlaylist(prev => {
-            const newPlaylist = [...prev];
+             // When user adds a track, remove any auto-filled tracks
+            const manualTracks = prev.filter(t => t.type !== 'marker' && t.addedBy !== 'auto-fill');
+            const newPlaylist = [...manualTracks];
             const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
 
             if (insertIndex !== -1) {
-                newPlaylist.splice(insertIndex, 0, track);
+                newPlaylist.splice(insertIndex, 0, { ...track, addedBy: 'user' });
             } else {
-                newPlaylist.push(track);
+                newPlaylist.push({ ...track, addedBy: 'user' });
             }
             
             if (currentPlayingItemId) {
@@ -2447,10 +1885,9 @@ const AppInternal: React.FC = () => {
         const itemToRemove = oldPlaylist.find(item => item.id === itemIdToRemove);
         
         // Memory cleanup
-        if (itemToRemove) {
-            const track = itemToRemove as Track;
-            if (track.src && track.src.startsWith('blob:')) {
-                URL.revokeObjectURL(track.src);
+        if (itemToRemove && itemToRemove.type !== 'marker') {
+            if (itemToRemove.src && itemToRemove.src.startsWith('blob:')) {
+                URL.revokeObjectURL(itemToRemove.src);
             }
         }
         
@@ -2462,7 +1899,7 @@ const AppInternal: React.FC = () => {
             if (currentPlayingItemId === itemIdToRemove) {
                 setIsPlaying(false);
                 setCurrentPlayingItemId(null);
-                const firstPlayable = findNextPlayableIndex(-1, 1, newPlaylist);
+                const firstPlayable = findNextPlayableIndex(-1, 1);
                 setCurrentTrackIndex(firstPlayable > -1 ? firstPlayable : 0);
             } else {
                 const newIndex = newPlaylist.findIndex(item => item.id === currentPlayingItemId);
@@ -2503,15 +1940,14 @@ const AppInternal: React.FC = () => {
     const handleClearPlaylist = useCallback(() => {
         // Memory cleanup before clearing
         playlistRef.current.forEach(item => {
-            const track = item as Track;
-            if (track.src && track.src.startsWith('blob:')) {
-                URL.revokeObjectURL(track.src);
+            if (item.type !== 'marker' && item.src && item.src.startsWith('blob:')) {
+                URL.revokeObjectURL(item.src);
             }
         });
 
         // If there is a current item (playing or paused), keep it.
-        if (currentItem) {
-            setPlaylist([currentItem]);
+        if (currentTrack) {
+            setPlaylist([currentTrack]);
             setCurrentTrackIndex(0);
         } else {
             // If the playlist is empty or has no valid "current" item, clear everything.
@@ -2522,12 +1958,7 @@ const AppInternal: React.FC = () => {
             setTrackProgress(0);
             setStopAfterTrackId(null);
         }
-         setAutoFilledItemIds(new Set());
-    }, [currentItem]);
-
-    const handleToggleAutoFill = useCallback(() => {
-        setPlayoutPolicy(p => ({ ...p, autoFillPlaylist: !p.autoFillPlaylist }));
-    }, []);
+    }, [currentTrack]);
 
     const handleAddTracksToLibrary = useCallback((tracks: Track[], destinationFolderId: string) => {
         setMediaLibrary(prevLibrary => addMultipleItemsToTree(prevLibrary, destinationFolderId, tracks));
@@ -2599,6 +2030,21 @@ const AppInternal: React.FC = () => {
         );
     }, []);
     
+// FIX: Added missing findFolderInTree function.
+const findFolderInTree = (node: Folder, folderId: string): Folder | null => {
+    if (node.id === folderId) {
+        return node;
+    }
+    for (const child of node.children) {
+        if (child.type === 'folder') {
+            const found = findFolderInTree(child as Folder, folderId);
+            if (found) {
+                return found;
+            }
+        }
+    }
+    return null;
+};
     const handleUpdateFolderTags = useCallback((folderId: string, newTags: string[]) => {
         let oldTags: string[] = [];
         const targetFolder = findFolderInTree(mediaLibrary, folderId);
@@ -2648,100 +2094,6 @@ const AppInternal: React.FC = () => {
             })
         );
     }, [mediaLibrary]);
-
-    const handleAddMarker = useCallback((data: { time: string; markerType: 'hard' | 'soft', title?: string, index?: number }) => {
-        const newMarker: TimeFixMarker = {
-            id: `marker-${Date.now()}`,
-            type: 'marker',
-            time: data.time,
-            markerType: data.markerType,
-            title: data.title,
-        };
-        setPlaylist(prev => {
-            const newPlaylist = [...prev];
-            const insertIndex = data.index ?? (prev.length > 0 ? currentTrackIndexRef.current + 1 : 0);
-            newPlaylist.splice(insertIndex, 0, newMarker);
-            return newPlaylist;
-        });
-    }, []);
-
-    const handleUpdateMarker = useCallback((markerId: string, data: { time: string; markerType: 'hard' | 'soft', title?: string }) => {
-        setPlaylist(prev => prev.map(item => {
-            if (item.id === markerId && item.type === 'marker') {
-                return { ...item, ...data };
-            }
-            return item;
-        }));
-    }, []);
-
-    const handleUpdateScheduleBlock = useCallback((block: ScheduledBlock) => {
-        setSchedule(prevSchedule => {
-            const existingIndex = prevSchedule.findIndex(b => b.id === block.id);
-            if (existingIndex !== -1) {
-                // Update existing
-                const newSchedule = [...prevSchedule];
-                newSchedule[existingIndex] = block;
-                return newSchedule;
-            } else {
-                // Add new
-                return [...prevSchedule, block];
-            }
-        });
-    }, []);
-
-    const handleClearScheduleBlock = useCallback((id: string) => {
-        setSchedule(p => p.filter(b => b.id !== id));
-    }, []);
-    
-    const handleLoadPlaylistFromSchedule = useCallback(async (hour: number) => {
-        const block = findBlockForHour(schedule, hour, new Date());
-        if (!block) {
-            alert(`No schedule found for ${hour}:00 on the selected date.`);
-            return;
-        }
-
-        let generatedPlaylist: SequenceItem[] = [];
-
-        if (block.type === 'sequence' && block.sequenceItems) {
-            generatedPlaylist = resolveSequenceItems(block.sequenceItems, mediaLibrary);
-        } else if (block.type === 'folder' && block.folderId) {
-            generatedPlaylist = generatePlaylistFromFolder(block.folderId, mediaLibrary, playoutPolicy, playoutHistory);
-        }
-
-        const initialDuration = generatedPlaylist.reduce((sum, item) => {
-            if (item.type !== 'marker' && item.type !== 'clock_start_marker' && item.type !== 'random_from_folder' && item.type !== 'random_from_tag' && item.type !== 'autofill_marker') {
-                return sum + (item as Track).duration;
-            }
-            return sum;
-        }, 0);
-    
-        if (playoutPolicy.autoFillPlaylist && initialDuration > 0 && initialDuration < 3600) {
-            const remainingDuration = 3600 - initialDuration;
-            const autoTracks = generatePlaylistFromTags(playoutPolicy.autoFillTags, mediaLibrary, playoutPolicy, playoutHistory, remainingDuration);
-
-            if (autoTracks.length > 0) {
-                const autoFillMarker: AutoFillMarker = {
-                    id: `autofill-${Date.now()}`,
-                    type: 'autofill_marker',
-                    title: `Auto-filled from '${playoutPolicy.autoFillTags.join(', ')}' tag(s)`
-                };
-                generatedPlaylist = [...generatedPlaylist, autoFillMarker, ...autoTracks];
-            }
-        }
-
-        if (generatedPlaylist.length === 0) {
-            alert(`Could not generate a playlist for ${hour}:00. The folder might be empty or the sequence contains deleted tracks.`);
-            return;
-        }
-
-        setPlaylistLoadRequest({ hour, generatedPlaylist });
-    }, [schedule, mediaLibrary, playoutPolicy, playoutHistory, resolveSequenceItems]);
-
-    const confirmLoadPlaylist = useCallback(() => {
-        if (!playlistLoadRequest) return;
-        performHardLoad(playlistLoadRequest.generatedPlaylist, isPlaying);
-        setPlaylistLoadRequest(null);
-    }, [playlistLoadRequest, isPlaying, performHardLoad]);
 
     // Auth Handlers
     const handleLogin = useCallback((email: string) => {
@@ -3005,13 +2357,16 @@ const AppInternal: React.FC = () => {
     const generateBackupData = useCallback(() => {
         const user = currentUserRef.current;
         const playlistToSave = playlistRef.current.filter(item => {
-            if (item.type !== 'marker' && item.type !== 'clock_start_marker' && item.type !== 'random_from_folder' && item.type !== 'random_from_tag' && item.type !== 'autofill_marker' && item.type === TrackType.LOCAL_FILE) {
+            if (item.type === 'marker') {
+                return true;
+            }
+            if (item.type === TrackType.LOCAL_FILE) {
                 return false;
             }
             return true;
         });
         const settingsToSave = { 
-            playoutPolicy: playoutPolicyRef.current, isAutoplayEnabled: isAutoplayEnabledRef.current,
+            playoutPolicy: playoutPolicyRef.current,
             logoSrc, headerGradient, isNowPlayingExportEnabled, metadataFormat, columnWidths,
             isMicPanelCollapsed, isHeaderCollapsed, isLibraryCollapsed, isAutoBackupEnabled, 
             isAutoBackupOnStartupEnabled, autoBackupInterval,
@@ -3027,7 +2382,6 @@ const AppInternal: React.FC = () => {
                 library: mediaLibraryRef.current,
                 settings: settingsToSave,
                 playlist: playlistToSave,
-                schedule: scheduleRef.current,
                 cartwall: cartwallCategoriesRef.current,
             }
         };
@@ -3144,65 +2498,188 @@ const AppInternal: React.FC = () => {
     const allFolders = useMemo(() => getAllFolders(mediaLibrary), [mediaLibrary]);
     const allTags = useMemo(() => getAllTags(mediaLibrary), [mediaLibrary]);
 
-    const enrichedPlaylist = useMemo(() => {
-        const enriched: TimelineItem[] = [];
-        if (playlist.length === 0) return [];
-    
-        let lastPushedHour: number | null = null;
-    
-        for (const item of playlist) {
-            // These are control markers and should not be displayed directly in the timeline UI.
-            if (item.type === 'clock_start_marker' || item.type === 'autofill_marker' || item.type === 'random_from_folder' || item.type === 'random_from_tag') {
-                continue;
-            }
-    
-            const timelineData = timeline.get(item.id);
-            const itemStartTime = timelineData?.startTime;
-    
-            if (itemStartTime) {
-                const itemHour = itemStartTime.getHours();
-    
-                if (lastPushedHour === null || itemHour !== lastPushedHour) {
-                    // Find the original source of this hour block by looking backwards in the raw playlist
-                    const originalIndex = playlist.findIndex(p => p.id === item.id);
-                    let source: 'schedule' | 'autofill' = 'autofill'; // Default to autofill
-                    let sourceTitle = 'Auto-Filled Playlist';
-                    
-                    for (let j = originalIndex; j >= 0; j--) {
-                        const precedingItem = playlist[j];
-                        if (precedingItem.type === 'clock_start_marker') {
-                            source = 'schedule';
-                            sourceTitle = precedingItem.title || `Scheduled for ${precedingItem.hour}:00`;
-                            break;
-                        }
-                        if (precedingItem.type === 'autofill_marker') {
-                            source = 'autofill';
-                            sourceTitle = precedingItem.title;
-                            break;
-                        }
+    // --- AUTO-FILL LOGIC ---
+    const isAutoFillingRef = useRef(false);
+
+    const generateAutoFillTracks = useCallback((): Track[] => {
+        const { autoFillSourceType, autoFillSourceId, autoFillTargetDuration, artistSeparation, titleSeparation } = playoutPolicyRef.current;
+        if (!autoFillSourceId) return [];
+
+        let sourceTracks: Track[] = [];
+        const seenArtists: Record<string, number> = {};
+        const seenTitles: Set<string> = new Set();
+        
+        // Seed seen items from recent playout history
+        const history = playoutHistoryRef.current;
+        const now = Date.now();
+        history.forEach(entry => {
+            if (entry.artist) seenArtists[entry.artist] = entry.playedAt;
+            seenTitles.add(entry.title);
+        });
+
+        const collectTracks = (item: LibraryItem) => {
+            if (item.type === 'folder') {
+                if (autoFillSourceType === 'folder') {
+                    if (item.id === autoFillSourceId) {
+                        item.children.forEach(collectTracks); // Start collecting from the source folder
+                    } else {
+                        // Keep traversing to find the source folder
+                        item.children.forEach(collectTracks);
                     }
-                    
-                    enriched.push({
-                        id: `hour-boundary-${itemHour}-${itemStartTime.getTime()}`,
-                        type: 'hour_boundary_marker',
-                        hour: itemHour,
-                        source,
-                        title: sourceTitle,
-                    });
-                    lastPushedHour = itemHour;
+                } else { // type is 'tag', so check tags
+                    if (item.tags?.includes(autoFillSourceId)) {
+                        item.children.forEach(collectTracks);
+                    } else {
+                        item.children.forEach(collectTracks);
+                    }
+                }
+            } else { // It's a track
+                if (item.type === TrackType.SONG) { // Only auto-fill with songs for now
+                     if (autoFillSourceType === 'folder') {
+                        sourceTracks.push(item);
+                    } else if (item.tags?.includes(autoFillSourceId)) {
+                        sourceTracks.push(item);
+                    }
                 }
             }
-            
-            const enrichedItem: TimelineItem = { ...item };
-            if (timelineData?.shortenedBy) {
-                enrichedItem.shortenedBy = timelineData.shortenedBy;
-            }
+        };
+        
+        // Find the starting point for collection
+         if (autoFillSourceType === 'folder') {
+            const sourceFolder = findFolderInTree(mediaLibraryRef.current, autoFillSourceId);
+            if (sourceFolder) collectTracks(sourceFolder);
+        } else {
+            collectTracks(mediaLibraryRef.current);
+        }
 
-            enriched.push(enrichedItem);
+        if (sourceTracks.length === 0) return [];
+
+        const generatedPlaylist: Track[] = [];
+        let currentDuration = 0;
+        const targetDurationSeconds = autoFillTargetDuration * 60;
+
+        // Fisher-Yates shuffle for randomness
+        for (let i = sourceTracks.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [sourceTracks[i], sourceTracks[j]] = [sourceTracks[j], sourceTracks[i]];
         }
         
-        return enriched;
-    }, [playlist, timeline]);
+        while (currentDuration < targetDurationSeconds && sourceTracks.length > 0) {
+            let foundTrack = false;
+            for (let i = 0; i < sourceTracks.length; i++) {
+                const track = sourceTracks[i];
+                const artistOK = !track.artist || !seenArtists[track.artist] || (now - seenArtists[track.artist] > artistSeparation * 60 * 1000);
+                const titleOK = !seenTitles.has(track.title);
+
+                if (artistOK && titleOK) {
+                    const trackWithMeta: Track = { ...track, addedBy: 'auto-fill' };
+                    generatedPlaylist.push(trackWithMeta);
+                    currentDuration += track.duration;
+                    if(track.artist) seenArtists[track.artist] = now + (currentDuration * 1000);
+                    seenTitles.add(track.title);
+                    sourceTracks.splice(i, 1);
+                    foundTrack = true;
+                    break;
+                }
+            }
+            if (!foundTrack) {
+                // If we can't find a track that meets separation rules, just grab the first one to avoid an infinite loop
+                const track = sourceTracks.shift();
+                if (track) {
+                    generatedPlaylist.push({ ...track, addedBy: 'auto-fill' });
+                    currentDuration += track.duration;
+                }
+            }
+        }
+
+        return generatedPlaylist;
+    }, []);
+
+    useEffect(() => {
+        const autoFillCheckInterval = setInterval(() => {
+            const { isAutoFillEnabled, autoFillLeadTime } = playoutPolicyRef.current;
+            if (!isAutoFillEnabled || isAutoFillingRef.current || isPresenterLive) {
+                return;
+            }
+
+            const currentPlaylist = playlistRef.current;
+            const currentPlayingIdx = currentPlaylist.findIndex(t => t.id === currentPlayingItemIdRef.current);
+            const currentProgress = trackProgressRef.current;
+
+            let remainingDuration = 0;
+            if (currentPlayingIdx !== -1) {
+                const currentItem = currentPlaylist[currentPlayingIdx];
+                // Time left in the current track
+                if (currentItem.type !== 'marker') {
+                    remainingDuration += (currentItem.duration - currentProgress);
+                }
+                // Time for all subsequent tracks
+                for (let i = currentPlayingIdx + 1; i < currentPlaylist.length; i++) {
+                    const item = currentPlaylist[i];
+                    if (item.type !== 'marker') {
+                        remainingDuration += item.duration;
+                    }
+                }
+            } else if (currentPlaylist.length > 0 && !isPlayingRef.current) {
+                // Playlist is loaded but stopped, calculate total duration
+                 remainingDuration = currentPlaylist.reduce((acc, item) => acc + (item.type !== 'marker' ? item.duration : 0), 0);
+            }
+
+            const leadTimeSeconds = autoFillLeadTime * 60;
+
+            if (remainingDuration < leadTimeSeconds) {
+                isAutoFillingRef.current = true;
+                console.log(`[Auto-Fill] Triggered. Remaining time: ${Math.round(remainingDuration)}s. Lead time: ${leadTimeSeconds}s.`);
+                const newTracks = generateAutoFillTracks();
+                if (newTracks.length > 0) {
+                    setPlaylist(prev => {
+                        // Ensure we don't add if a manual track was just added
+                        const lastTrack = prev[prev.length -1];
+                        if (lastTrack && lastTrack.type !== 'marker' && lastTrack.addedBy !== 'auto-fill') {
+                            return prev;
+                        }
+                        return [...prev, ...newTracks];
+                    });
+                }
+                 setTimeout(() => { isAutoFillingRef.current = false; }, 5000); // Cooldown
+            }
+        }, 15000); // Check every 15 seconds
+
+        return () => clearInterval(autoFillCheckInterval);
+    }, [generateAutoFillTracks, isPresenterLive]);
+
+    // --- Time Marker Handlers ---
+    const handleInsertTimeMarker = useCallback((marker: TimeMarker, beforeItemId: string | null) => {
+        setPlaylist(prev => {
+            const newPlaylist = [...prev];
+            const insertIndex = beforeItemId ? newPlaylist.findIndex(item => item.id === beforeItemId) : newPlaylist.length;
+            
+            if (insertIndex !== -1) {
+                newPlaylist.splice(insertIndex, 0, marker);
+            } else {
+                newPlaylist.push(marker);
+            }
+            
+            // Sort by time after adding
+            newPlaylist.sort((a, b) => {
+                const timeA = a.type === 'marker' ? a.time : 0;
+                const timeB = b.type === 'marker' ? b.time : 0;
+                if (timeA > 0 && timeB > 0) return timeA - timeB;
+                return 0; // Keep relative order of tracks
+            });
+
+            return newPlaylist;
+        });
+    }, []);
+
+    const handleUpdateTimeMarker = useCallback((markerId: string, updates: Partial<TimeMarker>) => {
+        setPlaylist(prev => 
+            prev.map(item => 
+                item.id === markerId && item.type === 'marker' ? { ...item, ...updates } : item
+            )
+        );
+    }, []);
+
     
     return (
         <div className="flex flex-col h-screen bg-white dark:bg-black text-black dark:text-white font-sans overflow-hidden">
@@ -3226,8 +2703,6 @@ const AppInternal: React.FC = () => {
                                 onLogoChange={handleLogoChange}
                                 onLogoReset={() => { setLogoSrc(null); setHeaderGradient(null); }}
                                 headerGradient={headerGradient}
-                                isAutoFillEnabled={playoutPolicy.autoFillPlaylist}
-                                onToggleAutoFill={handleToggleAutoFill}
                             />
                         </div>
                         <div className="relative h-0 border-b border-neutral-200 dark:border-neutral-800">
@@ -3278,16 +2753,13 @@ const AppInternal: React.FC = () => {
                         {/* Center Column: Playlist */}
                         <div style={{ flexBasis: `${displayedColumnWidths[1]}%` }} className="flex-shrink-0 h-full border border-neutral-200 dark:border-neutral-800 rounded-lg shadow-md bg-neutral-100 dark:bg-neutral-900 overflow-hidden">
                             <Playlist
-                                items={enrichedPlaylist}
-                                rawPlaylist={playlist}
+                                items={playlist}
                                 currentPlayingItemId={currentPlayingItemId}
                                 onRemove={handleRemoveFromPlaylist}
                                 onReorder={handleReorderPlaylist}
                                 onPlayTrack={handlePlayTrack}
                                 onAddTrack={handleAddToPlaylist}
                                 onInsertTrack={handleInsertTrackInPlaylist}
-                                onAddMarker={handleAddMarker}
-                                onUpdateMarker={handleUpdateMarker}
                                 isPlaying={isPlaying}
                                 stopAfterTrackId={stopAfterTrackId}
                                 onSetStopAfterTrackId={setStopAfterTrackId}
@@ -3299,10 +2771,8 @@ const AppInternal: React.FC = () => {
                                 pflProgress={pflProgress}
                                 mediaLibrary={mediaLibrary}
                                 timeline={timeline}
-                                isAutoFillEnabled={playoutPolicy.autoFillPlaylist}
-                                onToggleAutoFill={handleToggleAutoFill}
-                                skippedItemIds={skippedItemIds}
-                                autoFilledItemIds={autoFilledItemIds}
+                                onInsertTimeMarker={handleInsertTimeMarker}
+                                onUpdateTimeMarker={handleUpdateTimeMarker}
                             />
                         </div>
 
@@ -3313,17 +2783,15 @@ const AppInternal: React.FC = () => {
                              <div className="flex-grow flex flex-col min-h-0">
                                 <div className="flex-shrink-0 border-b border-neutral-200 dark:border-neutral-800">
                                     <nav className="flex justify-around">
-                                        <button onClick={() => setActiveRightColumnTab('scheduler')} className={`p-3 w-full transition-colors ${activeRightColumnTab === 'scheduler' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Scheduler"><ClockIcon className="w-6 h-6 mx-auto" /></button>
                                         <button onClick={() => setActiveRightColumnTab('cartwall')} className={`p-3 w-full transition-colors ${activeRightColumnTab === 'cartwall' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Cartwall"><GridIcon className="w-6 h-6 mx-auto" /></button>
                                         <button onClick={() => setActiveRightColumnTab('mixer')} className={`p-3 w-full transition-colors ${activeRightColumnTab === 'mixer' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Mixer"><MixerIcon className="w-6 h-6 mx-auto" /></button>
                                         <button onClick={() => setActiveRightColumnTab('settings')} className={`p-3 w-full transition-colors ${activeRightColumnTab === 'settings' ? 'bg-neutral-200 dark:bg-neutral-800' : 'hover:bg-neutral-200/50 dark:hover:bg-neutral-800/50'}`} title="Settings"><SettingsIcon className="w-6 h-6 mx-auto" /></button>
                                     </nav>
                                 </div>
                                 <div className="flex-grow overflow-y-auto">
-                                    {activeRightColumnTab === 'scheduler' && <RotationScheduler schedule={schedule} onUpdateSchedule={handleUpdateScheduleBlock} onClearSchedule={handleClearScheduleBlock} onLoadPlaylist={handleLoadPlaylistFromSchedule} mediaLibrary={mediaLibrary} folders={allFolders} allTags={allTags} />}
                                     {activeRightColumnTab === 'cartwall' && <Cartwall categories={cartwallCategories} playingCartwallId={playingCartwallId} onPlayItem={handlePlayCartwallItem} onAssignItem={handleAssignCartwallItem} onClearItem={handleClearCartwallItem} onSetItemColor={handleSetCartwallItemColor} onAddCategory={handleAddCartwallCategory} onRenameCategory={handleRenameCartwallCategory} onDeleteCategory={handleDeleteCartwallCategory} onSetItemCount={handleSetCartwallItemCount} mediaLibrary={mediaLibrary} activeCategoryId={activeCartwallCategoryId} onSetActiveCategoryId={setActiveCartwallCategoryId} duckingLevel={0.2} onSetDuckingLevel={()=>{}} cartwallProgress={cartwallTrackProgress} cartwallDuration={cartwallTrackDuration} />}
                                     {activeRightColumnTab === 'mixer' && <AudioMixer mixerConfig={mixerConfig} onMixerChange={setMixerConfig} audioBuses={audioBuses} onBusChange={setAudioBuses} availableOutputDevices={availableAudioDevices} policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} audioLevels={audioLevels} />}
-                                    {activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={()=>{}} onExportData={handleExportData} isNowPlayingExportEnabled={isNowPlayingExportEnabled} onSetIsNowPlayingExportEnabled={setIsNowPlayingExportEnabled} onSetNowPlayingFile={handleSetNowPlayingFile} nowPlayingFileName={nowPlayingFileName} metadataFormat={metadataFormat} onSetMetadataFormat={setMetadataFormat} allTags={allTags} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} onSetAutoBackupFolder={handleSetAutoBackupFolder} autoBackupFolderPath={autoBackupFolderPath} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} />}
+                                    {activeRightColumnTab === 'settings' && <Settings policy={playoutPolicy} onUpdatePolicy={setPlayoutPolicy} currentUser={currentUser} onImportData={()=>{}} onExportData={handleExportData} isNowPlayingExportEnabled={isNowPlayingExportEnabled} onSetIsNowPlayingExportEnabled={setIsNowPlayingExportEnabled} onSetNowPlayingFile={handleSetNowPlayingFile} nowPlayingFileName={nowPlayingFileName} metadataFormat={metadataFormat} onSetMetadataFormat={setMetadataFormat} isAutoBackupEnabled={isAutoBackupEnabled} onSetIsAutoBackupEnabled={setIsAutoBackupEnabled} autoBackupInterval={autoBackupInterval} onSetAutoBackupInterval={setAutoBackupInterval} onSetAutoBackupFolder={handleSetAutoBackupFolder} autoBackupFolderPath={autoBackupFolderPath} isAutoBackupOnStartupEnabled={isAutoBackupOnStartupEnabled} onSetIsAutoBackupOnStartupEnabled={setIsAutoBackupOnStartupEnabled} allFolders={allFolders} allTags={allTags} />}
                                 </div>
                             </div>
                             <div className="flex-shrink-0 border-t border-neutral-200 dark:border-neutral-800 bg-neutral-100 dark:bg-neutral-900">
@@ -3357,16 +2825,6 @@ const AppInternal: React.FC = () => {
                     </main>
                 </>
             )}
-             <ConfirmationDialog
-                isOpen={!!playlistLoadRequest}
-                onClose={() => setPlaylistLoadRequest(null)}
-                onConfirm={confirmLoadPlaylist}
-                title={`Load Playlist for ${String(playlistLoadRequest?.hour || 0).padStart(2, '0')}:00?`}
-                confirmText="Load Playlist"
-                confirmButtonClass="bg-black dark:bg-white hover:bg-neutral-800 dark:hover:bg-neutral-200 text-white dark:text-black"
-            >
-                This will replace your current playlist. Are you sure you want to continue?
-            </ConfirmationDialog>
              <MetadataSettingsModal
                 folder={editingMetadataFolder}
                 onClose={() => setEditingMetadataFolder(null)}

@@ -1,10 +1,10 @@
+
 import React, { useRef, useState, useEffect } from 'react';
 import { type PlayoutPolicy } from '../types';
 import { DownloadIcon } from './icons/DownloadIcon';
 import ConfirmationDialog from './ConfirmationDialog';
 import { UploadIcon } from './icons/UploadIcon';
 import { FolderIcon } from './icons/FolderIcon';
-import { CloseIcon } from './icons/CloseIcon';
 import { Toggle } from './Toggle';
 
 interface SettingsProps {
@@ -19,7 +19,6 @@ interface SettingsProps {
     nowPlayingFileName: string | null;
     metadataFormat: string;
     onSetMetadataFormat: (format: string) => void;
-    allTags: string[];
     isAutoBackupEnabled: boolean;
     onSetIsAutoBackupEnabled: (enabled: boolean) => void;
     isAutoBackupOnStartupEnabled: boolean;
@@ -28,67 +27,9 @@ interface SettingsProps {
     onSetAutoBackupInterval: (interval: number) => void;
     onSetAutoBackupFolder: () => Promise<void>;
     autoBackupFolderPath: string | null;
-}
-
-const TagInput: React.FC<{
-    tags: string[];
-    setTags: (tags: string[]) => void;
+    allFolders: { id: string, name: string }[];
     allTags: string[];
-}> = ({ tags, setTags, allTags }) => {
-    const [inputValue, setInputValue] = useState('');
-    const inputRef = useRef<HTMLInputElement>(null);
-
-    const handleAddTag = (tagToAdd: string) => {
-        const trimmedTag = tagToAdd.trim();
-        if (trimmedTag && !tags.includes(trimmedTag)) {
-            setTags([...tags, trimmedTag]);
-        }
-        setInputValue('');
-    };
-    
-    const handleRemoveTag = (tagToRemove: string) => {
-        setTags(tags.filter(t => t !== tagToRemove));
-    };
-
-    const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-        if (e.key === 'Enter' || e.key === ',') {
-            e.preventDefault();
-            handleAddTag(inputValue);
-        }
-    };
-    
-    const filteredSuggestions = allTags.filter(
-        tag => tag.toLowerCase().includes(inputValue.toLowerCase()) && !tags.includes(tag)
-    ).slice(0, 10); // Limit suggestions
-
-    return (
-        <div className="w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md p-2 flex flex-wrap gap-2 items-center" onClick={() => inputRef.current?.focus()}>
-            {tags.map(tag => (
-                <span key={tag} className="flex items-center gap-1 bg-blue-100 dark:bg-blue-900/50 text-blue-800 dark:text-blue-300 text-sm font-medium px-2 py-1 rounded-full">
-                    {tag}
-                    <button onClick={() => handleRemoveTag(tag)} className="text-blue-500 hover:text-blue-700 dark:hover:text-blue-400">
-                        <CloseIcon className="w-3 h-3"/>
-                    </button>
-                </span>
-            ))}
-            <input
-                ref={inputRef}
-                type="text"
-                value={inputValue}
-                onChange={e => setInputValue(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Add a tag..."
-                list="autofill-tag-suggestions"
-                className="flex-grow bg-transparent outline-none text-sm text-black dark:text-white"
-            />
-            <datalist id="autofill-tag-suggestions">
-                {filteredSuggestions.map(tag => (
-                    <option key={tag} value={tag} />
-                ))}
-            </datalist>
-        </div>
-    );
-};
+}
 
 const Settings: React.FC<SettingsProps> = ({ 
     policy, 
@@ -102,7 +43,6 @@ const Settings: React.FC<SettingsProps> = ({
     nowPlayingFileName,
     metadataFormat,
     onSetMetadataFormat,
-    allTags,
     isAutoBackupEnabled,
     onSetIsAutoBackupEnabled,
     isAutoBackupOnStartupEnabled,
@@ -111,6 +51,8 @@ const Settings: React.FC<SettingsProps> = ({
     onSetAutoBackupInterval,
     onSetAutoBackupFolder,
     autoBackupFolderPath,
+    allFolders,
+    allTags
 }) => {
     const importInputRef = useRef<HTMLInputElement>(null);
     const [importData, setImportData] = useState<any | null>(null);
@@ -203,11 +145,82 @@ const Settings: React.FC<SettingsProps> = ({
             </div>
 
             <hr className="border-neutral-200 dark:border-neutral-800" />
+            
+             <div>
+                <h2 className="text-xl font-semibold">Auto-Fill (Dead Air Protection)</h2>
+                <p className="text-sm text-neutral-500 dark:text-neutral-400 mt-1">
+                    Automatically fill the playlist to prevent silence when it's about to run out of tracks.
+                </p>
+            </div>
+             <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                    <div>
+                        <label htmlFor="autofill-enabled" className="text-sm font-medium block cursor-pointer">Enable Auto-Fill</label>
+                        <p className="text-xs text-neutral-500">Activates dead air protection.</p>
+                    </div>
+                    <Toggle id="autofill-enabled" checked={policy.isAutoFillEnabled} onChange={(v) => handlePolicyChange('isAutoFillEnabled', v)} />
+                </div>
+                 {policy.isAutoFillEnabled && (
+                    <div className="space-y-6 pt-4 pl-4 border-l-2 border-neutral-300 dark:border-neutral-700">
+                         <div className="space-y-3">
+                            <label htmlFor="autofill-lead-time" className="flex justify-between text-sm font-medium">
+                                <span>Load Playlist Ahead of Time</span>
+                                <span className="font-mono">{policy.autoFillLeadTime} min</span>
+                            </label>
+                            <input
+                                id="autofill-lead-time" type="range" min="5" max="60" step="5"
+                                value={policy.autoFillLeadTime}
+                                onChange={(e) => handlePolicyChange('autoFillLeadTime', parseInt(e.target.value, 10))}
+                                className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"
+                            />
+                        </div>
+                         <div>
+                            <span className="text-sm font-medium">Music Source</span>
+                            <div className="mt-2 flex gap-4">
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input type="radio" name="autofill-source" value="folder" checked={policy.autoFillSourceType === 'folder'} onChange={(e) => handlePolicyChange('autoFillSourceType', e.target.value)} className="h-4 w-4 text-black dark:text-white bg-white dark:bg-black border-neutral-400 dark:border-neutral-600 focus:ring-black dark:focus:ring-white"/>
+                                    <span>Folder</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input type="radio" name="autofill-source" value="tag" checked={policy.autoFillSourceType === 'tag'} onChange={(e) => handlePolicyChange('autoFillSourceType', e.target.value)} className="h-4 w-4 text-black dark:text-white bg-white dark:bg-black border-neutral-400 dark:border-neutral-600 focus:ring-black dark:focus:ring-white"/>
+                                    <span>Tag</span>
+                                </label>
+                            </div>
+                             <select
+                                value={policy.autoFillSourceId || ''}
+                                onChange={(e) => handlePolicyChange('autoFillSourceId', e.target.value || null)}
+                                className="mt-2 w-full bg-white dark:bg-black border border-neutral-300 dark:border-neutral-700 rounded-md px-3 py-2 text-black dark:text-white"
+                            >
+                                <option value="">Select a source...</option>
+                                {policy.autoFillSourceType === 'folder' 
+                                    ? allFolders.map(f => <option key={f.id} value={f.id}>{f.name}</option>)
+                                    : allTags.map(t => <option key={t} value={t}>{t}</option>)
+                                }
+                            </select>
+                        </div>
+                        <div className="space-y-3">
+                             <label htmlFor="autofill-duration" className="flex justify-between text-sm font-medium">
+                                <span>Fill Duration</span>
+                                <span className="font-mono">{policy.autoFillTargetDuration} min</span>
+                            </label>
+                            <input
+                                id="autofill-duration" type="range" min="15" max="180" step="15"
+                                value={policy.autoFillTargetDuration}
+                                onChange={(e) => handlePolicyChange('autoFillTargetDuration', parseInt(e.target.value, 10))}
+                                className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"
+                            />
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            <hr className="border-neutral-200 dark:border-neutral-800" />
+
 
             <div>
-                <h2 className="text-xl font-semibold">Automation</h2>
+                <h2 className="text-xl font-semibold">Playback Options</h2>
                 <p className="text-sm text-neutral-500 dark:text-neutral-400 mt-1">
-                    Enable smart features to automate your broadcast.
+                    Configure playback behavior.
                 </p>
             </div>
             
@@ -219,41 +232,6 @@ const Settings: React.FC<SettingsProps> = ({
                     </div>
                     <Toggle id="remove-played" checked={policy.removePlayedTracks} onChange={(v) => handlePolicyChange('removePlayedTracks', v)} />
                 </div>
-
-                <div className="flex items-center justify-between">
-                    <div>
-                        <label htmlFor="autofill-playlist" className="text-sm font-medium block cursor-pointer">Auto-fill Playlist</label>
-                        <p className="text-xs text-neutral-500">Automatically add songs to fill the playlist.</p>
-                    </div>
-                    <Toggle id="autofill-playlist" checked={policy.autoFillPlaylist} onChange={(v) => handlePolicyChange('autoFillPlaylist', v)} />
-                </div>
-                 
-                 {policy.autoFillPlaylist && (
-                    <div className="space-y-6 pl-4 pt-4 mt-4 border-l-2 border-neutral-200 dark:border-neutral-800">
-                        <div>
-                            <label className="block text-sm font-medium">Auto-fill Tags</label>
-                            <p className="text-xs text-neutral-500 mb-2">Tags to use when auto-filling. Defaults to 'auto'.</p>
-                            <TagInput
-                                tags={policy.autoFillTags || []}
-                                setTags={(newTags) => handlePolicyChange('autoFillTags', newTags)}
-                                allTags={allTags}
-                            />
-                        </div>
-                        <div className="space-y-3">
-                            <label htmlFor="autofill-lookahead" className="flex justify-between text-sm font-medium">
-                                <span>Auto-fill Trigger Time</span>
-                                <span className="font-mono">{policy.autoFillLookahead} min</span>
-                            </label>
-                            <p className="text-xs text-neutral-500">How many minutes before the next hour to generate a playlist if no clock is scheduled. Also acts as a safety buffer if the playlist is about to run out of music.</p>
-                            <input
-                                id="autofill-lookahead" type="range" min="5" max="60" step="5"
-                                value={policy.autoFillLookahead}
-                                onChange={(e) => handlePolicyChange('autoFillLookahead', parseInt(e.target.value, 10))}
-                                className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-lg appearance-none cursor-pointer"
-                            />
-                        </div>
-                    </div>
-                )}
                                   
                  <hr className="border-neutral-200 dark:border-neutral-800" />
 

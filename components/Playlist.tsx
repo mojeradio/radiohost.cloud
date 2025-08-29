@@ -1,32 +1,31 @@
+
+
 import React, { useState, useMemo } from 'react';
-import { type Track, TrackType, type SequenceItem, type TimeFixMarker, type HourBoundaryMarker, type Folder, TimelineItem } from '../types';
+// FIX: Added 'Track' type to the import to resolve multiple 'Cannot find name' errors.
+import { type SequenceItem, TrackType, type Folder, TimeMarkerType, type TimeMarker, type Track } from '../types';
 import { TrashIcon } from './icons/TrashIcon';
 import { GrabHandleIcon } from './icons/GrabHandleIcon';
 import { PlayIcon } from './icons/PlayIcon';
 import { NowPlayingIcon } from './icons/NowPlayingIcon';
 import ConfirmationDialog from './ConfirmationDialog';
 import { StopAfterTrackIcon } from './icons/StopAfterTrackIcon';
-import { ClockIcon } from './icons/ClockIcon';
-import AddTimeMarkerModal from './AddTimeMarkerModal';
-import { ClockPlusIcon } from './icons/ClockPlusIcon';
 import { HeadphoneIcon } from './icons/HeadphoneIcon';
-import { PlusIcon } from './icons/PlusIcon';
-import { CloseIcon } from './icons/CloseIcon';
-import { CalendarIcon } from './icons/CalendarIcon';
-import { RotationIcon } from './icons/RotationIcon';
+import { SparklesIcon } from './icons/SparklesIcon';
+import AddTimeMarkerModal from './AddTimeMarkerModal';
 import { Toggle } from './Toggle';
+import { ClockPlusIcon } from './icons/ClockPlusIcon';
+import { EditIcon } from './icons/EditIcon';
 
 interface PlaylistProps {
-    items: TimelineItem[];
-    rawPlaylist: SequenceItem[];
+    items: SequenceItem[];
     currentPlayingItemId: string | null;
     onRemove: (itemId: string) => void;
     onReorder: (draggedId: string, dropTargetId: string | null) => void;
     onPlayTrack: (itemId: string) => void;
     onAddTrack: (track: Track) => void;
     onInsertTrack: (track: Track, beforeItemId: string | null) => void;
-    onAddMarker: (data: { time: string; markerType: 'hard' | 'soft', title?: string, index?: number }) => void;
-    onUpdateMarker: (markerId: string, data: { time: string; markerType: 'hard' | 'soft', title?: string }) => void;
+    onInsertTimeMarker: (marker: TimeMarker, beforeItemId: string | null) => void;
+    onUpdateTimeMarker: (markerId: string, updates: Partial<TimeMarker>) => void;
     isPlaying: boolean;
     stopAfterTrackId: string | null;
     onSetStopAfterTrackId: (id: string | null) => void;
@@ -38,10 +37,6 @@ interface PlaylistProps {
     pflProgress: number;
     mediaLibrary: Folder;
     timeline: Map<string, { startTime: Date, endTime: Date, duration: number, isSkipped?: boolean, shortenedBy?: number }>;
-    isAutoFillEnabled: boolean;
-    onToggleAutoFill: () => void;
-    skippedItemIds: Set<string>;
-    autoFilledItemIds: Set<string>;
 }
 
 const formatDuration = (seconds: number): string => {
@@ -85,13 +80,14 @@ const isDuplicateCheckSuppressed = (trackId: string, library: Folder): boolean =
 
 // --- Memoized List Item Components for Performance ---
 
-const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWarning, trackProgress, stopAfterTrackId, timelineData, onPlayTrack, onSetStopAfterTrackId, onRemove, onDragStart, onDragEnd, onDragOver, onDragEnter, onDrop, draggedId, onPflTrack, pflTrackId, isPflPlaying, pflProgress, isSkipped, isAutoFilled, shortenedBy }: {
+const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWarning, isSkipped, trackProgress, stopAfterTrackId, timelineData, onPlayTrack, onSetStopAfterTrackId, onRemove, onDragStart, onDragEnd, onDragOver, onDragEnter, onDrop, draggedId, onPflTrack, pflTrackId, isPflPlaying, pflProgress }: {
     track: Track;
     isCurrentlyPlaying: boolean;
     isDuplicateWarning: boolean;
+    isSkipped: boolean;
     trackProgress: number;
     stopAfterTrackId: string | null;
-    timelineData?: { startTime: Date, endTime: Date, duration: number };
+    timelineData?: { startTime: Date, endTime: Date, duration: number, shortenedBy?: number };
     onPlayTrack: () => void;
     onSetStopAfterTrackId: () => void;
     onRemove: () => void;
@@ -105,9 +101,6 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
     pflTrackId: string | null;
     isPflPlaying: boolean;
     pflProgress: number;
-    isSkipped: boolean;
-    isAutoFilled: boolean;
-    shortenedBy?: number;
 }) => {
     const trackDuration = timelineData ? timelineData.duration : track.duration;
     const progressPercentage = isCurrentlyPlaying && trackDuration > 0
@@ -121,12 +114,9 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
     const timeLeft = trackDuration - trackProgress;
     const isEnding = isCurrentlyPlaying && timeLeft <= 10 && timeLeft > 0;
     const isSong = track.type === TrackType.SONG;
-    const isSqueezed = timelineData && timelineData.duration < track.duration - 1;
 
     const getListItemClasses = () => {
         if (isCurrentlyPlaying) return 'bg-green-600 border-green-500';
-        if (isSkipped) return 'border-transparent opacity-40';
-        if (isAutoFilled) return 'bg-neutral-200/60 dark:bg-neutral-800/60 border-transparent';
         if (isDuplicateWarning) return 'bg-red-500/20 dark:bg-red-900/40 border-red-500';
         if (isPflActive) return 'border-blue-500 bg-blue-500/10';
         if (stopAfterTrackId === track.id) return 'border-neutral-400 dark:border-neutral-600';
@@ -135,7 +125,7 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
 
     return (
         <li
-            draggable={!isSkipped}
+            draggable
             onDragStart={onDragStart}
             onDragEnd={onDragEnd}
             onDragOver={onDragOver}
@@ -146,6 +136,7 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
                 border
                 ${getListItemClasses()}
                 ${draggedId === track.id ? 'opacity-30' : ''}
+                ${isSkipped ? 'opacity-40 bg-neutral-200 dark:bg-neutral-800' : ''}
                 ${isEnding ? 'animate-pulse-ending' : ''}
             `}
         >
@@ -160,7 +151,7 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
                 style={{ width: `${progressPercentage}%` }}
             />
              <div className="flex-shrink-0 flex items-center gap-4">
-                <div className={`text-neutral-400 dark:text-neutral-500 ${!isSkipped && 'cursor-grab'}`} title="Drag to reorder">
+                <div className={`text-neutral-400 dark:text-neutral-500 ${isSkipped ? 'cursor-not-allowed' : 'cursor-grab'}`} title="Drag to reorder">
                     <GrabHandleIcon className="w-5 h-5" />
                 </div>
                 <div className="w-16 font-mono text-sm text-neutral-500 dark:text-neutral-400 pt-0.5 text-right pr-2">{formatTime(timelineData?.startTime)}</div>
@@ -175,53 +166,47 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
                     ) : (
                         <div className="relative h-full w-full flex items-center justify-center">
                             <button
-                                disabled={isSkipped}
                                 onClick={onPlayTrack}
                                 className="absolute inset-0 flex items-center justify-center text-black dark:text-white"
                                 aria-label={`Play ${track.title}`}
+                                disabled={isSkipped}
                             >
                                 <PlayIcon className="w-5 h-5" />
                             </button>
                         </div>
                     )}
                 </div>
-                <div className="truncate">
+                <div className="truncate flex items-center gap-2">
                      <p className={`font-medium truncate ${isCurrentlyPlaying ? 'text-white' : 'text-black dark:text-white'}`}>
                         {isSong && track.artist ? `${track.artist} - ${track.title}` : track.title}
                      </p>
-                    {shortenedBy && shortenedBy > 0 && (
-                        <p className="text-xs text-yellow-600 dark:text-yellow-400 font-mono italic">
-                            Shortened by {formatDuration(shortenedBy)}
-                        </p>
-                    )}
+                    {track.addedBy === 'auto-fill' && <SparklesIcon className="w-4 h-4 text-neutral-400 dark:text-neutral-500 flex-shrink-0" title="Added by Auto-Fill" />}
                     {(track.artist && !isSong) &&
                         <p className={`text-sm truncate ${isCurrentlyPlaying ? 'text-green-200' : 'text-neutral-600 dark:text-neutral-400'}`}>{track.artist}</p>
                     }
                 </div>
             </div>
             <div className="flex items-center gap-2">
-                {isAutoFilled && <RotationIcon className="w-4 h-4 text-neutral-400 dark:text-neutral-500" title="Auto-filled" />}
-                <span className={`font-mono text-sm ${isCurrentlyPlaying ? 'text-green-200' : 'text-neutral-500'}`} title={isSqueezed ? `Original duration: ${formatDuration(track.duration)}` : ''}>
-                    {isSqueezed && <span className="text-yellow-400">*</span>}{formatDuration(trackDuration)}
+                <span className={`font-mono text-sm ${isCurrentlyPlaying ? 'text-green-200' : 'text-neutral-500'}`}>
+                    {formatDuration(trackDuration)}
                 </span>
                  <button
-                    disabled={isSkipped}
                     onClick={() => onPflTrack(track.id)}
                     className={`p-1 transition-colors ${isPflActive ? 'opacity-100 text-blue-500' : 'text-neutral-500 dark:text-neutral-400 opacity-0 group-hover:opacity-100 hover:text-blue-500 focus:opacity-100'}`}
                     title="PFL"
+                    disabled={isSkipped}
                 >
                     <HeadphoneIcon className="w-5 h-5" />
                 </button>
                 <button
-                    disabled={isSkipped}
                     onClick={onSetStopAfterTrackId}
                     className={`p-1 transition-colors ${stopAfterTrackId === track.id ? 'opacity-100 text-black dark:text-white' : 'text-neutral-500 dark:text-neutral-400 opacity-0 group-hover:opacity-100 hover:text-black dark:hover:text-white focus:opacity-100'}`}
                     title="Stop after this track and enable mic"
+                    disabled={isSkipped}
                 >
                     <StopAfterTrackIcon className="w-5 h-5" />
                 </button>
                 <button
-                    disabled={isSkipped}
                     onClick={onRemove}
                     className="p-1 text-neutral-500 dark:text-neutral-400 opacity-0 group-hover:opacity-100 hover:text-black dark:hover:text-white transition-opacity focus:opacity-100"
                     title="Remove from playlist"
@@ -233,10 +218,10 @@ const PlaylistItemTrack = React.memo(({ track, isCurrentlyPlaying, isDuplicateWa
     );
 });
 
-const PlaylistItemMarker = React.memo(({ item, onDoubleClick, onRemove, onDragStart, onDragEnd, onDragOver, onDragEnter, onDrop, draggedId }: {
-    item: TimeFixMarker;
-    onDoubleClick: (marker: TimeFixMarker) => void;
+const PlaylistItemMarker = React.memo(({ marker, onRemove, onEdit, onDragStart, onDragEnd, onDragOver, onDragEnter, onDrop, draggedId }: {
+    marker: TimeMarker;
     onRemove: () => void;
+    onEdit: () => void;
     onDragStart: (e: React.DragEvent<HTMLLIElement>) => void;
     onDragEnd: () => void;
     onDragOver: (e: React.DragEvent<HTMLElement>) => void;
@@ -244,9 +229,8 @@ const PlaylistItemMarker = React.memo(({ item, onDoubleClick, onRemove, onDragSt
     onDrop: (e: React.DragEvent<HTMLLIElement>) => void;
     draggedId: string | null;
 }) => {
-    const isHard = item.markerType === 'hard';
-    const textColor = isHard ? 'text-yellow-800 dark:text-yellow-300' : 'text-blue-800 dark:text-blue-300';
-    const iconColor = isHard ? 'text-yellow-600 dark:text-yellow-400' : 'text-blue-600 dark:text-blue-400';
+    const isHard = marker.markerType === TimeMarkerType.HARD;
+    const markerTime = new Date(marker.time);
 
     return (
         <li
@@ -256,71 +240,46 @@ const PlaylistItemMarker = React.memo(({ item, onDoubleClick, onRemove, onDragSt
             onDragOver={onDragOver}
             onDragEnter={onDragEnter}
             onDrop={onDrop}
-            onDoubleClick={() => onDoubleClick(item)}
-            title="Drag to reorder, double-click to edit"
-            className={`relative flex items-center gap-4 py-2 px-3 my-1 transition-opacity ${draggedId === item.id ? 'opacity-30' : 'opacity-100'}`}
+            className={`
+                flex items-center justify-between p-3 rounded-lg transition-colors duration-150 group border-2
+                ${isHard ? 'border-red-500/50 bg-red-500/10' : 'border-blue-500/50 bg-blue-500/10'}
+                ${draggedId === marker.id ? 'opacity-30' : ''}
+            `}
         >
-            <span className="flex-grow h-px bg-neutral-300 dark:bg-neutral-700"></span>
-            <div className="flex items-center gap-3 text-neutral-500 dark:text-neutral-400 flex-shrink-0 text-center cursor-pointer group">
-                <div className="cursor-grab" title="Drag to reorder">
-                    <GrabHandleIcon className="w-5 h-5 text-neutral-400 dark:text-neutral-500" />
+            <div className="flex items-center gap-4">
+                <div className="text-neutral-400 dark:text-neutral-500 cursor-grab" title="Drag to reorder">
+                    <GrabHandleIcon className="w-5 h-5" />
                 </div>
-                <ClockIcon className={`w-5 h-5 ${iconColor} flex-shrink-0`} />
-                <div>
-                    <span className={`font-bold text-sm block ${textColor}`}>
-                        {item.title || (isHard ? 'HARD TIME FIX' : 'SOFT TIME FIX')}
-                    </span>
-                    <span className={`text-xs italic block truncate max-w-[200px] font-mono ${textColor}`}>
-                        @{item.time}
-                    </span>
-                </div>
-                 <button
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        onRemove();
-                    }}
-                    className="p-1 text-neutral-500 dark:text-neutral-400 hover:text-red-500 transition-opacity opacity-0 group-hover:opacity-100"
-                    title="Remove marker"
-                >
-                    <TrashIcon className="w-4 h-4" />
-                </button>
-            </div>
-            <span className="flex-grow h-px bg-neutral-300 dark:bg-neutral-700"></span>
-        </li>
-    );
-});
-
-const PlaylistItemHourBoundary = React.memo(({ item }: { item: HourBoundaryMarker }) => {
-    const isSchedule = item.source === 'schedule';
-    const Icon = isSchedule ? CalendarIcon : RotationIcon;
-
-    return (
-        <li className="relative flex items-center gap-4 py-2 px-3 my-1">
-            <span className="flex-grow h-px bg-neutral-300 dark:bg-neutral-700"></span>
-            <div className="flex items-center gap-3 text-neutral-500 dark:text-neutral-400 flex-shrink-0 text-center">
-                <Icon className="w-5 h-5" />
-                <div>
-                    <span className="font-bold text-sm block">
-                        {String(item.hour).padStart(2, '0')}:00
-                    </span>
-                    <span className="text-xs italic block truncate max-w-[200px]">
-                        {item.title}
-                    </span>
+                <div className="flex items-center gap-3">
+                    <ClockPlusIcon className={`w-5 h-5 ${isHard ? 'text-red-500' : 'text-blue-500'}`} />
+                    <div className="font-semibold text-black dark:text-white">
+                        Time Marker: <span className="font-mono">{markerTime.toLocaleTimeString('en-GB')}</span>
+                    </div>
                 </div>
             </div>
-            <span className="flex-grow h-px bg-neutral-300 dark:bg-neutral-700"></span>
+            <div className="flex items-center gap-4">
+                 <span className={`px-2 py-0.5 text-xs font-bold rounded-full ${isHard ? 'bg-red-200 text-red-800 dark:bg-red-900/50 dark:text-red-300' : 'bg-blue-200 text-blue-800 dark:bg-blue-900/50 dark:text-blue-300'}`}>
+                    {isHard ? 'HARD' : 'SOFT'}
+                </span>
+                <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center">
+                    <button onClick={onEdit} className="p-1 text-neutral-500 hover:text-black dark:hover:text-white" title="Edit Marker">
+                        <EditIcon className="w-5 h-5"/>
+                    </button>
+                    <button onClick={onRemove} className="p-1 text-neutral-500 hover:text-black dark:hover:text-white" title="Remove Marker">
+                        <TrashIcon className="w-5 h-5"/>
+                    </button>
+                </div>
+            </div>
         </li>
     );
 });
 
 
-const Playlist: React.FC<PlaylistProps> = ({ items, rawPlaylist, currentPlayingItemId, onRemove, onReorder, onPlayTrack, onAddTrack, onInsertTrack, onAddMarker, onUpdateMarker, isPlaying, stopAfterTrackId, onSetStopAfterTrackId, trackProgress, onClearPlaylist, onPflTrack, pflTrackId, isPflPlaying, pflProgress, mediaLibrary, timeline, isAutoFillEnabled, onToggleAutoFill, skippedItemIds, autoFilledItemIds }) => {
+const Playlist: React.FC<PlaylistProps> = ({ items, currentPlayingItemId, onRemove, onReorder, onPlayTrack, onAddTrack, onInsertTrack, onInsertTimeMarker, onUpdateTimeMarker, isPlaying, stopAfterTrackId, onSetStopAfterTrackId, trackProgress, onClearPlaylist, onPflTrack, pflTrackId, isPflPlaying, pflProgress, mediaLibrary, timeline }) => {
     const totalDuration = useMemo(() => items.reduce((sum, item) => {
-        if (item.type !== 'marker' && item.type !== 'hour_boundary_marker' && item.type !== 'clock_start_marker' && item.type !== 'random_from_folder' && item.type !== 'random_from_tag' && item.type !== 'autofill_marker') {
-            const timelineData = timeline.get(item.id);
-            return sum + (timelineData ? timelineData.duration : (item as Track).duration);
-        }
-        return sum;
+        if (item.type === 'marker') return sum;
+        const timelineData = timeline.get(item.id);
+        return sum + (timelineData && !timelineData.isSkipped ? timelineData.duration : 0);
     }, 0), [items, timeline]);
     
     const [draggedId, setDraggedId] = useState<string | null>(null);
@@ -328,25 +287,20 @@ const Playlist: React.FC<PlaylistProps> = ({ items, rawPlaylist, currentPlayingI
     const [itemToDeleteId, setItemToDeleteId] = useState<string | null>(null);
     const [isDragOver, setIsDragOver] = useState(false);
     const [isClearConfirmOpen, setIsClearConfirmOpen] = useState(false);
-    const [isAddMarkerModalOpen, setIsAddMarkerModalOpen] = useState(false);
-    const [editingMarker, setEditingMarker] = useState<TimeFixMarker | null>(null);
-    const [addMarkerPrefill, setAddMarkerPrefill] = useState<{ time: string, index: number } | null>(null);
-    const [isAddingMarker, setIsAddingMarker] = useState(false);
+    const [isMarkerModeActive, setIsMarkerModeActive] = useState(false);
+    const [markerModalState, setMarkerModalState] = useState<{ beforeItemId: string | null, existingMarker?: TimeMarker } | null>(null);
 
     const duplicateIds = useMemo(() => {
         const problematicIds = new Set<string>();
         const DUPLICATE_SLOT_WINDOW = 7;
     
-        const onlyTracks = items.filter(item => 
-            item.type !== 'marker' && item.type !== 'hour_boundary_marker'
-        ) as Track[];
-    
-        onlyTracks.forEach((track, index) => {
+        const tracks = items.filter(item => item.type !== 'marker') as Track[];
+        tracks.forEach((track, index) => {
             if (track.type !== TrackType.SONG || isDuplicateCheckSuppressed(track.id, mediaLibrary)) {
                 return;
             }
-            for (let i = index + 1; i < Math.min(index + 1 + DUPLICATE_SLOT_WINDOW, onlyTracks.length); i++) {
-                const futureTrack = onlyTracks[i];
+            for (let i = index + 1; i < Math.min(index + 1 + DUPLICATE_SLOT_WINDOW, tracks.length); i++) {
+                const futureTrack = tracks[i];
                 if (futureTrack.type === TrackType.SONG && futureTrack.id === track.id) {
                     problematicIds.add(track.id);
                     problematicIds.add(futureTrack.id);
@@ -356,7 +310,6 @@ const Playlist: React.FC<PlaylistProps> = ({ items, rawPlaylist, currentPlayingI
     
         return problematicIds;
     }, [items, mediaLibrary]);
-
 
     const handleDragStart = (e: React.DragEvent, itemId: string) => {
         e.dataTransfer.setData('dragged-item-id', itemId);
@@ -390,24 +343,6 @@ const Playlist: React.FC<PlaylistProps> = ({ items, rawPlaylist, currentPlayingI
         
         const draggedItemId = e.dataTransfer.getData('dragged-item-id');
         const trackJson = e.dataTransfer.getData('application/json');
-
-        let itemBefore: SequenceItem | undefined;
-        if (dropTargetId) {
-            const dropIndex = rawPlaylist.findIndex(item => item.id === dropTargetId);
-            if (dropIndex > 0) {
-                itemBefore = rawPlaylist[dropIndex - 1];
-            }
-        } else { // Dropping at the end of the list
-            if (rawPlaylist.length > 0) {
-                itemBefore = rawPlaylist[rawPlaylist.length - 1];
-            }
-        }
-
-        if (itemBefore && itemBefore.type === 'marker') {
-            console.warn("Cannot place an item immediately after a time marker.");
-            handleDragEnd();
-            return;
-        }
 
         if (draggedItemId) {
             if (draggedItemId !== dropTargetId) {
@@ -458,107 +393,6 @@ const Playlist: React.FC<PlaylistProps> = ({ items, rawPlaylist, currentPlayingI
 
     const handleConfirmClear = () => { onClearPlaylist(); setIsClearConfirmOpen(false); };
 
-    const openAddMarkerModal = (index: number, time: Date | undefined) => {
-        const prefillTime = time ? `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}:00` : '';
-        setAddMarkerPrefill({ time: prefillTime, index });
-        setIsAddMarkerModalOpen(true);
-        setIsAddingMarker(false);
-    };
-
-    const currentPlayingIndex = useMemo(() => currentPlayingItemId ? items.findIndex(item => item.id === currentPlayingItemId) : -1, [items, currentPlayingItemId]);
-
-    const renderItems = () => {
-        const rendered = [];
-        let trackCounter = 0;
-
-        const MarkerInserter = ({ index, time, isEnd = false }: { index: number; time?: Date, isEnd?: boolean }) => (
-             <li key={`inserter-${index}`} className="h-4 relative group">
-                <div className="h-px bg-neutral-300 dark:bg-neutral-600 w-full absolute top-1/2 -translate-y-1/2"></div>
-                <button 
-                    onClick={() => openAddMarkerModal(index, time)}
-                    className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 px-2 py-0.5 rounded-full bg-neutral-100 dark:bg-neutral-900 flex items-center gap-1 border border-transparent group-hover:border-neutral-400 dark:group-hover:border-neutral-500 transition-colors"
-                >
-                    <PlusIcon className="w-4 h-4 text-neutral-500 dark:text-neutral-400" />
-                    <span className="text-xs font-mono text-neutral-500 dark:text-neutral-400">{isEnd ? 'Add at end' : formatTime(time)}</span>
-                </button>
-            </li>
-        );
-
-        if (isAddingMarker && currentPlayingIndex === -1 && items.length > 0) {
-            const firstItemTime = timeline.get(items[0].id)?.startTime;
-            const timeBefore = firstItemTime ? new Date(firstItemTime.getTime() - 1000) : new Date();
-             rendered.push(<MarkerInserter key="inserter-start" index={0} time={timeBefore} />);
-        }
-
-        for (let index = 0; index < items.length; index++) {
-            const item = items[index];
-            const timelineData = timeline.get(item.id);
-            const isCurrentlyPlaying = item.id === currentPlayingItemId;
-            const isSkipped = skippedItemIds.has(item.id);
-            const isAutoFilled = autoFilledItemIds.has(item.id);
-            const shortenedBy = item.shortenedBy;
-
-            if (item.type === 'hour_boundary_marker') {
-                rendered.push(<PlaylistItemHourBoundary key={item.id} item={item} />);
-            } else if (item.type === 'marker') {
-                rendered.push(
-                    <PlaylistItemMarker
-                        key={item.id}
-                        item={item}
-                        onDoubleClick={setEditingMarker}
-                        onRemove={() => handleDeleteRequest(item.id)}
-                        onDragStart={(e) => handleDragStart(e, item.id)}
-                        onDragEnd={handleDragEnd}
-                        onDragOver={handleDragOver}
-                        onDragEnter={() => {}}
-                        onDrop={(e) => handleDrop(e, item.id)}
-                        draggedId={draggedId}
-                    />
-                );
-            } else {
-                trackCounter++;
-                const track = item as Track;
-                rendered.push(
-                   <PlaylistItemTrack
-                        key={item.id}
-                        track={track}
-                        isCurrentlyPlaying={isCurrentlyPlaying}
-                        isDuplicateWarning={duplicateIds.has(item.id)}
-                        trackProgress={isCurrentlyPlaying ? trackProgress : 0}
-                        stopAfterTrackId={stopAfterTrackId}
-                        timelineData={timelineData}
-                        onPlayTrack={() => onPlayTrack(item.id)}
-                        onSetStopAfterTrackId={() => handleStopAfterClick(item.id)}
-                        onRemove={() => handleDeleteRequest(item.id)}
-                        onDragStart={(e) => handleDragStart(e, item.id)}
-                        onDragEnd={handleDragEnd}
-                        onDragOver={handleDragOver}
-                        onDragEnter={() => {}}
-                        onDrop={(e) => handleDrop(e, item.id)}
-                        draggedId={draggedId}
-                        onPflTrack={onPflTrack}
-                        pflTrackId={pflTrackId}
-                        isPflPlaying={isPflPlaying}
-                        pflProgress={pflProgress}
-                        isSkipped={isSkipped}
-                        isAutoFilled={isAutoFilled}
-                        shortenedBy={shortenedBy}
-                   />
-                );
-            }
-
-            if (isAddingMarker && (currentPlayingIndex === -1 || index >= currentPlayingIndex)) {
-                if (item.type !== 'marker' && !isSkipped) {
-                    const nonMarkerItems = rawPlaylist.slice(0, rawPlaylist.findIndex(i => i.id === item.id) + 1);
-                    const originalIndex = nonMarkerItems.length;
-                    rendered.push(<MarkerInserter index={originalIndex} time={timelineData?.endTime} />);
-                }
-            }
-        }
-        return rendered;
-    };
-
-
     return (
         <div 
             className={`flex flex-col h-full transition-colors duration-200 ${isDragOver ? 'bg-green-500/10' : ''}`}
@@ -566,48 +400,105 @@ const Playlist: React.FC<PlaylistProps> = ({ items, rawPlaylist, currentPlayingI
             onDragOver={handleDragOver}
             onDragLeave={handleContainerDragLeave}
         >
-            <div className="flex justify-between items-center p-4 border-b border-neutral-200 dark:border-neutral-800">
-                <h2 className="text-xl font-semibold">Timeline</h2>
-                 <div className="flex items-center gap-4">
-                    <span className="text-sm text-neutral-500 dark:text-neutral-400 font-mono">
-                        Total: {formatDuration(totalDuration)}
-                    </span>
-                    
-                    <div className="flex items-center gap-2" title={isAutoFillEnabled ? "Auto-fill playlist ON" : "Auto-fill playlist OFF"}>
-                        <label htmlFor="autofill-toggle" className="text-sm font-medium text-neutral-600 dark:text-neutral-400 cursor-pointer select-none">
-                            Auto-fill
-                        </label>
-                        <Toggle
-                            id="autofill-toggle"
-                            checked={isAutoFillEnabled}
-                            onChange={onToggleAutoFill}
-                        />
+            <div className="flex-shrink-0 p-4 border-b border-neutral-200 dark:border-neutral-800 space-y-3">
+                 <div className="flex justify-between items-center">
+                    <h2 className="text-xl font-semibold">Timeline</h2>
+                    <div className="flex items-center gap-4">
+                        <span className="text-sm text-neutral-500 dark:text-neutral-400 font-mono">
+                            Total: {formatDuration(totalDuration)}
+                        </span>
+                        <div className="h-4 border-l border-neutral-300 dark:border-neutral-700"></div>
+                        <button
+                            onClick={() => setIsClearConfirmOpen(true)}
+                            disabled={items.length === 0}
+                            className="p-1.5 text-neutral-500 dark:text-neutral-400 hover:text-black dark:hover:text-white disabled:text-neutral-300 dark:disabled:text-neutral-600 disabled:cursor-not-allowed transition-colors"
+                            title="Clear Playlist"
+                        >
+                            <TrashIcon className="w-5 h-5" />
+                        </button>
                     </div>
-                    
-                    <div className="h-4 border-l border-neutral-300 dark:border-neutral-700"></div>
-
-                    <button
-                        onClick={() => setIsAddingMarker(p => !p)}
-                        className={`p-1.5 rounded-md transition-colors ${isAddingMarker ? 'bg-red-500 text-white' : 'text-neutral-500 dark:text-neutral-400 hover:text-black dark:hover:text-white'}`}
-                        title={isAddingMarker ? "Cancel Adding Marker" : "Add Time Marker"}
-                    >
-                        {isAddingMarker ? <CloseIcon className="w-5 h-5" /> : <ClockPlusIcon className="w-5 h-5" />}
-                    </button>
-                   
-                    <button
-                        onClick={() => setIsClearConfirmOpen(true)}
-                        disabled={items.length === 0}
-                        className="p-1.5 text-neutral-500 dark:text-neutral-400 hover:text-black dark:hover:text-white disabled:text-neutral-300 dark:disabled:text-neutral-600 disabled:cursor-not-allowed transition-colors"
-                        title="Clear Playlist"
-                    >
-                        <TrashIcon className="w-5 h-5" />
-                    </button>
-                </div>
+                 </div>
+                 <div className="flex items-center justify-end gap-2 text-sm">
+                    <label htmlFor="marker-mode-toggle" className="font-medium text-neutral-600 dark:text-neutral-400 cursor-pointer">
+                        Add Marker Mode
+                    </label>
+                    <Toggle id="marker-mode-toggle" checked={isMarkerModeActive} onChange={setIsMarkerModeActive} />
+                 </div>
             </div>
             <div className="flex-grow overflow-y-auto">
                 <ul className="p-2 space-y-1">
-                     {renderItems()}
-                     {items.length === 0 && !isAddingMarker &&(
+                     {items.map((item, index) => {
+                        const prevItem = index > 0 ? items[index-1] : null;
+                        const showAddMarkerButton = isMarkerModeActive && index > 0 && (!prevItem || prevItem.type !== 'marker');
+
+                        return (
+                           <React.Fragment key={item.id}>
+                                {showAddMarkerButton && (
+                                    <li className="flex justify-center items-center h-4 my-1 group">
+                                        <div className="w-full h-px bg-neutral-200 dark:bg-neutral-800 relative">
+                                            <button 
+                                                onClick={() => setMarkerModalState({ beforeItemId: item.id })}
+                                                className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 p-1 bg-neutral-100 dark:bg-neutral-900 rounded-full text-neutral-400 dark:text-neutral-600 hover:text-black dark:hover:text-white hover:bg-neutral-200 dark:hover:bg-neutral-800 scale-90 group-hover:scale-100 opacity-70 group-hover:opacity-100 transition-all"
+                                                title="Add Time Marker"
+                                            >
+                                                <ClockPlusIcon className="w-5 h-5"/>
+                                            </button>
+                                        </div>
+                                    </li>
+                                )}
+                               {item.type === 'marker' ? (
+                                    <PlaylistItemMarker
+                                        marker={item}
+                                        onRemove={() => handleDeleteRequest(item.id)}
+                                        onEdit={() => setMarkerModalState({ beforeItemId: null, existingMarker: item })}
+                                        onDragStart={(e) => handleDragStart(e, item.id)}
+                                        onDragEnd={handleDragEnd}
+                                        onDragOver={handleDragOver}
+                                        onDragEnter={() => {}}
+                                        onDrop={(e) => handleDrop(e, item.id)}
+                                        draggedId={draggedId}
+                                    />
+                               ) : (
+                                    <PlaylistItemTrack
+                                        track={item}
+                                        isCurrentlyPlaying={item.id === currentPlayingItemId}
+                                        isDuplicateWarning={duplicateIds.has(item.id)}
+                                        isSkipped={!!timeline.get(item.id)?.isSkipped}
+                                        trackProgress={item.id === currentPlayingItemId ? trackProgress : 0}
+                                        stopAfterTrackId={stopAfterTrackId}
+                                        timelineData={timeline.get(item.id)}
+                                        onPlayTrack={() => onPlayTrack(item.id)}
+                                        onSetStopAfterTrackId={() => handleStopAfterClick(item.id)}
+                                        onRemove={() => handleDeleteRequest(item.id)}
+                                        onDragStart={(e) => handleDragStart(e, item.id)}
+                                        onDragEnd={handleDragEnd}
+                                        onDragOver={handleDragOver}
+                                        onDragEnter={() => {}}
+                                        onDrop={(e) => handleDrop(e, item.id)}
+                                        draggedId={draggedId}
+                                        onPflTrack={onPflTrack}
+                                        pflTrackId={pflTrackId}
+                                        isPflPlaying={isPflPlaying}
+                                        pflProgress={pflProgress}
+                                   />
+                               )}
+                           </React.Fragment>
+                        );
+                     })}
+                     {isMarkerModeActive && (items.length === 0 || items[items.length - 1].type !== 'marker') && (
+                        <li className="flex justify-center items-center h-4 my-1 group">
+                            <div className="w-full h-px bg-neutral-200 dark:bg-neutral-800 relative">
+                                <button
+                                    onClick={() => setMarkerModalState({ beforeItemId: null })}
+                                    className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 p-1 bg-neutral-100 dark:bg-neutral-900 rounded-full text-neutral-400 dark:text-neutral-600 hover:text-black dark:hover:text-white hover:bg-neutral-200 dark:hover:bg-neutral-800 scale-90 group-hover:scale-100 opacity-70 group-hover:opacity-100 transition-all"
+                                    title="Add Time Marker"
+                                >
+                                    <ClockPlusIcon className="w-5 h-5" />
+                                </button>
+                            </div>
+                        </li>
+                    )}
+                     {items.length === 0 && (
                         <li className="text-center text-neutral-400 dark:text-neutral-500 p-8">
                             Playlist is empty. Add or drag tracks here from the library.
                         </li>
@@ -621,32 +512,30 @@ const Playlist: React.FC<PlaylistProps> = ({ items, rawPlaylist, currentPlayingI
                 title="Clear Playlist"
                 confirmText="Clear"
             >
-                Are you sure you want to clear the playlist?
+                Are you sure you want to clear the playlist? This will remove all tracks and markers.
                 {isPlaying && ' The currently playing track will be kept.'}
             </ConfirmationDialog>
             <ConfirmationDialog
                 isOpen={isConfirmOpen}
                 onClose={handleCloseDialog}
                 onConfirm={handleConfirmDelete}
-                title="Remove from Playlist"
+                title={`Remove ${itemToDelete?.type === 'marker' ? 'Marker' : 'Track'}`}
             >
-                Are you sure you want to remove "{itemToDelete?.type === 'marker' ? `Time Marker at ${itemToDelete.time}` : (itemToDelete as Track)?.title}" from the playlist?
+                Are you sure you want to remove "{itemToDelete?.type !== 'marker' ? itemToDelete?.title : 'Time Marker'}" from the playlist?
             </ConfirmationDialog>
-            <AddTimeMarkerModal
-                isOpen={isAddMarkerModalOpen || !!editingMarker}
-                onClose={() => {
-                    setIsAddMarkerModalOpen(false);
-                    setEditingMarker(null);
-                    setAddMarkerPrefill(null);
-                }}
-                onSave={(data) => {
-                    if (editingMarker) {
-                        onUpdateMarker(editingMarker.id, data);
+             <AddTimeMarkerModal
+                isOpen={!!markerModalState}
+                onClose={() => setMarkerModalState(null)}
+                onAddMarker={(marker) => {
+                    if(markerModalState?.existingMarker) {
+                         onUpdateTimeMarker(markerModalState.existingMarker.id, marker);
                     } else {
-                        onAddMarker({ ...data, index: addMarkerPrefill?.index });
+                        // FIX: The marker from AddTimeMarkerModal is a full TimeMarker object,
+                        // but typed as Partial for flexibility. Cast to TimeMarker for insertion.
+                        onInsertTimeMarker(marker as TimeMarker, markerModalState?.beforeItemId || null);
                     }
                 }}
-                initialData={editingMarker || addMarkerPrefill}
+                existingMarker={markerModalState?.existingMarker}
             />
         </div>
     );
